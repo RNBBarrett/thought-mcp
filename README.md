@@ -44,21 +44,291 @@ See [CHANGELOG.md](CHANGELOG.md) for the full v0.2 list. The v0.1 horizontal-mem
 
 ---
 
-## Why this exists
+## What is THOUGHT?
 
-The 2024–2026 wave of LLM memory products is split between two patterns, each with a structural limitation we wanted to fix in one system:
+THOUGHT is a **memory server for LLMs**. You install it on your machine, wire it into your AI coding assistant (Claude Code, Cursor, Cline, Continue, Windsurf), and now your assistant has a brain that persists across conversations and across projects.
+
+Everything runs **locally** — your memory is a single SQLite file on your laptop. No cloud, no account, no sync service, no API key.
+
+### The problem it solves
+
+Out of the box, AI coding assistants have goldfish memory. Every new conversation starts blank. If you told it last week to *"always use Postgres for v2 features,"* you'll be telling it again today. If you decided in March that *"the auth module is being rewritten,"* by April that context is gone.
+
+Existing fixes don't really solve this — they trade one problem for another:
+
+| Common workaround | What goes wrong |
+|---|---|
+| **Stuff context into your system prompt** | You hit token limits fast, and the model can't tell what's current vs. obsolete. |
+| **Cloud memory** (ChatGPT, Claude Projects) | Locked to one vendor, no audit log, can't query *"as of last week,"* no contradiction handling. |
+| **RAG over your notes** (mem0, Letta, …) | Stores facts as flat vectors. No relationships between facts, no time tracking, no provenance, no notion of "this used to be true." |
+| **An LLM-maintained Markdown wiki** (Karpathy's gist) | Lossy by design (the LLM summarises everything), grows linearly, no semantic search, no temporal queries. |
+
+THOUGHT fixes the structural issues, not just the symptoms.
+
+### What you get
+
+Once installed, your AI assistant gains two new tools it can call automatically when the conversation implies it:
+
+- **`remember(content)`** — *"note that we decided X."* THOUGHT extracts the entities and relationships, embeds them for similarity search, and links everything to its source so you can audit later.
+- **`recall(query)`** — *"what did we decide about X?"* THOUGHT figures out what kind of question you asked, routes it to the right retrieval strategy, and returns at most 10 hits — each tagged with how trustworthy it is.
+
+You can also drive it from your terminal (CLI) or use the Python API directly.
+
+### Why it's better than existing solutions
+
+The TL;DR, in plain English:
+
+- **It knows when facts changed.** Every fact carries two timestamps: when it was true in the world, and when the system learned it. *"What did we say about pricing on Jan 15?"* actually works — even if pricing changed on Feb 3.
+
+- **It tracks how facts relate.** Functions, classes, people, projects, decisions — they're all entities in a typed graph (CALLS, OWNS, INHERITS_FROM, CONTRADICTS, …). Asking *"who calls `authenticate_user`?"* is a real graph query, not a fuzzy text match.
+
+- **It refuses to hallucinate relationships.** Every edge has a mandatory pointer back to the source document that produced it. If a fact has no source, it doesn't exist. No more *"the model invented a connection that was never in the data."*
+
+- **It surfaces contradictions instead of silently overwriting.** When you say *"auth is now using sessions"* after previously saying *"auth is JWT,"* both facts stay. A `CONTRADICTS` edge is created. `recall` can then answer *"what facts about auth are currently disputed?"*
+
+- **It picks the right retrieval method per question.** Fuzzy associative queries hit vector similarity. Relationship queries hit graph traversal. Time-travel queries hit the temporal layer. The wrong question never hits the wrong index.
+
+- **It bounds output.** No matter how big the knowledge base gets, `recall` returns at most 10 hits. Your context window doesn't get blown up by a runaway retrieval.
+
+- **It's append-only.** Nothing is ever deleted. When facts go stale, they're retired (their validity window closes), not erased. Full forensic audit of every change.
+
+- **It's natively multi-user.** `scope='shared'` for project-wide facts, `scope='private'` with `owner_id` for personal notes. Five devs on one repo each get their own private memory plus a shared common pool.
+
+Plus **eleven cutting-edge retrieval techniques** from 2024–2026 literature (Anthropic Contextual Retrieval, HippoRAG-style PageRank, bi-temporal Graphiti, CRAG, MetaRAG confidence, …) stacked on top — see the [Frontier techniques](#frontier-techniques-incorporated-with-credits) section below for the full list with citations.
+
+The technical capability matrix vs. the closest comparable systems:
 
 | | OB1 (pgvector) | Karpathy LLM-Wiki | **THOUGHT** |
 |---|---|---|---|
 | Relationship logic | flat rows | flat markdown | **typed graph edges** |
-| Temporal awareness | none | none | **bi-temporal valid + learned** |
+| Temporal awareness | none | none | **bi-temporal (world-time + learned-time)** |
 | Provenance | informal tag | informal citation | **mandatory `source_ref` on every edge** |
 | Multi-user | RLS bolted on | single-user | **native two-zone graph** |
-| Query routing | always vector | always inject | **VIBE / FACT / CHANGE / HYBRID router** |
+| Query routing | always vector | always inject | **VIBE / FACT / CHANGE / CODE / HYBRID router** |
 | Contradiction model | absent | LLM lint only | **`CONTRADICTS` typed edge, write-time** |
 | Bounded result size | unbounded | unbounded | **≤10 enforced** |
 
-THOUGHT also stacks **eleven cutting-edge techniques** from 2024-2026 literature so the gap isn't just qualitative.
+### What THOUGHT is **not**
+
+- **Not a cloud service.** Everything runs locally. No data leaves your machine.
+- **Not a vector DB replacement.** It uses one (sqlite-vec by default, pgvector optional), but adds the graph + temporal layers on top.
+- **Not a fine-tuner.** It doesn't change your model. It changes what your model can *remember*.
+- **Not retrieval-quality magic.** No single 10× win exists in 2024–2026 LLM-retrieval literature; THOUGHT compounds several 1.5-3× gains across orthogonal dimensions. Expect 2-3× better recall on questions that actually need the typed graph or temporal layer; expect roughly parity on pure-vibe semantic queries.
+
+---
+
+## How to use THOUGHT
+
+This section walks through everything from install to advanced workflows, with explanations of *why* each step exists. If you just want the 30-second version, skip to **[Quickstart](#quickstart)**.
+
+### Install
+
+Three ways. Pick one:
+
+```bash
+# Option 1 (recommended) — full bundle, everything you'll use
+pip install 'thought-mcp[all]'
+
+# Option 2 — minimal: CLI + MCP server only (no production embeddings)
+pip install thought-mcp
+
+# Option 3 — zero install: uvx fetches it on demand
+uvx thought-mcp install --client cursor
+```
+
+`uvx` is what the MCP client configs use internally, so option 3 is fine if you don't want a global install. After install, verify with:
+
+```bash
+thought doctor
+```
+
+You should see all green. Any red items will print the exact command to fix them.
+
+### Quickstart
+
+The one-line happy path for connecting THOUGHT to your AI client:
+
+```bash
+thought start --client cursor   # or claude-code, cline, continue, windsurf
+```
+
+Then **restart your AI client** (close every window, reopen). Done. The next conversation will have the `remember` and `recall` tools available.
+
+If you're not sure which client to pick, run `thought install --detect` first — it shows every supported client's config path and whether it's installed on your machine.
+
+### What `thought start` actually does
+
+Knowing what changed makes troubleshooting easier later:
+
+1. **Creates the SQLite database** at `.thought/thought.db` in your current directory. This is your memory. Back it up like any database.
+2. **Writes `CLAUDE.md`** in your current directory. This tells your AI assistant how the memory tools work and when to use them. You can edit it to add project-specific conventions like *"always tag finance decisions with scope=private."*
+3. **Writes `thought.toml`** with sensible defaults. Most people never need to touch it.
+4. **Updates your AI client's MCP config** to register `thought` as a server. The previous config is backed up to `<config>.thought.bak`.
+5. **Starts the MCP server** in the background, listening on `127.0.0.1:8765`.
+
+After your AI client restarts, it discovers `thought` and gains the two new tools.
+
+### Day-to-day usage — letting your AI use the memory
+
+Once wired up, your AI assistant calls `remember` and `recall` *automatically* when the conversation implies it. You usually don't need to invoke them explicitly. Here's what that looks like:
+
+**Telling it to remember something:**
+
+```
+You:  We've decided to use Postgres for the v2 release.
+AI:   Got it. [calls remember internally]
+      Stored. We can recall this with "database plan" or similar later.
+```
+
+The AI parses out the facts (v2 → Postgres), links them to the conversation as the source, and writes them to memory. You don't see the tool call.
+
+**Asking about something it remembered:**
+
+```
+You:  What's our database plan?
+AI:   [calls recall internally]
+      Based on what's in memory: for v2 we're using Postgres
+      (source_grounded, recorded 3 days ago).
+```
+
+The AI also sees how trustworthy each hit is via its `confidence_class` (`source_grounded`, `inferred`, or `hallucination_risk`). If a hit comes back as hallucination_risk, a well-prompted AI will flag the uncertainty rather than presenting it as fact.
+
+**Time travel — what was true at some past date:**
+
+```
+You:  What was our pricing on January 15?
+AI:   [calls recall with as_of="2026-01-15"]
+      On Jan 15: Free / Pro $19 / Team $99.
+      Pricing changed on Feb 3 to Free / Pro $25 / Team $129, so the
+      current prices are different.
+```
+
+This is THOUGHT's most distinctive capability. Existing memory tools structurally can't answer this — they overwrite old facts. THOUGHT keeps both, marks the older one retired, and `as_of` queries see the world as it was.
+
+**Catching contradictions automatically:**
+
+```
+You:  Remember that auth is now using sessions.
+AI:   Noted. [calls remember]
+      Heads up: a previously-stored fact says "auth is JWT."
+      Both are now in memory, linked by a CONTRADICTS edge.
+      Want me to retire the JWT fact?
+```
+
+The AI sees the conflict at write time and prompts you. The JWT fact isn't deleted — it's marked as superseded but still queryable for audit.
+
+**Private vs. shared scope (multi-user / multi-project):**
+
+```
+You:  Remember as a private note: I prefer 4-space indentation.
+AI:   Stored in your private scope. Won't surface in shared recalls.
+```
+
+Use `scope='private'` for personal preferences. Use `scope='shared'` for project decisions everyone on the team should see. A shared recall returns public facts plus the requester's own private facts; never another user's.
+
+### How to nudge the AI when it doesn't reach for memory
+
+If your AI is being lazy and skipping `recall`, try phrases like:
+
+- *"According to memory..."*
+- *"What do we have on..."*
+- *"As of last week, ..."*
+- *"Check memory for..."*
+- *"@thought what's our..."* (in clients that support tool-prefix syntax)
+
+To insist on storing something:
+
+- *"Note this down: ..."*
+- *"Remember that..."*
+- *"Store this for later: ..."*
+- *"Add to memory: ..."*
+
+The single highest-leverage thing is the **`CLAUDE.md`** file that `thought init` drops in your project. Edit it to add project-specific conventions. The AI reads it on every session start, so rules like *"always remember architectural decisions, never remember code snippets"* are honored consistently.
+
+### Working with code — the v0.2 capabilities
+
+If you're using THOUGHT for AI-assisted coding (the v0.2 specialisation), there's a separate ingest path that parses your source files via tree-sitter and builds a real function-call graph:
+
+```bash
+# Ingest a codebase — entities are functions / classes / methods / modules
+thought ingest-code src/
+
+# Ingest with full git history so as_of queries work for code
+thought ingest-git . --mode full
+
+# Ask who calls a function (ranked by importance)
+thought callers authenticate_user
+
+# Ask what's affected if you change a function
+thought impact authenticate_user
+
+# Show the set difference of entities between two commits
+thought diff --from v1.0 --to HEAD
+```
+
+After ingestion, the AI's regular `recall` tool also gains code awareness. Natural-language questions like *"who calls authenticate_user?"* route through the call-graph machinery automatically.
+
+### Using the CLI directly (no AI involved)
+
+THOUGHT works fine from a terminal without an AI assistant. The CLI is most useful for bulk operations and inspection:
+
+```bash
+# Add a single fact
+thought ingest "Alice owns Acme Corp. Acme is part of HoldCo."
+
+# Bulk-ingest a directory of Markdown notes
+thought ingest --glob 'docs/**/*.md'
+
+# Pipe in from any tool that emits one fact per line
+git log --since='1 week ago' --format='%s' | thought ingest --stdin
+
+# Query directly
+thought recall "who owns Acme"
+
+# Open an interactive REPL — type queries, type +text to add facts
+thought repl
+
+# See what's currently in memory
+thought stats
+
+# Soft-delete entities matching a SQL LIKE pattern (audit-logged, not destroyed)
+thought forget "kendra%"
+```
+
+### Upgrading
+
+When a new version of THOUGHT ships:
+
+```bash
+pip install --upgrade thought-mcp     # pull the new package
+thought upgrade --all                 # re-pin every MCP client config to the new version
+# Restart your AI client to pick up the new server.
+```
+
+`thought upgrade --all` solves the *"uvx is still using its cached old version"* problem by re-pinning your MCP client configs to the exact version you just installed (with the required extras included).
+
+### MCP client config paths (manual install if `--detect` can't find your client)
+
+If `thought install --detect` doesn't find a client you have installed, the JSON block to add manually is:
+
+```json
+{
+  "mcpServers": {
+    "thought": {
+      "command": "uvx",
+      "args": ["--from", "thought-mcp[mcp,sqlite-vec]", "thought", "serve"]
+    }
+  }
+}
+```
+
+Per-client locations:
+
+- **Claude Code** — `~/.claude.json` (top-level `mcpServers` block)
+- **Cursor** — `~/.cursor/mcp.json`
+- **Cline** — VS Code `globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` (or `~/.cline/cline_mcp_settings.json`)
+- **Continue** — `~/.continue/config.json`
+- **Windsurf** — `~/.codeium/windsurf/mcp_config.json`
 
 ---
 
@@ -87,157 +357,6 @@ THOUGHT exists because of:
 | 11 | **Append-only writes (Mem0 2026)** — never UPDATE/DELETE | [Mem0 State of Memory 2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026) |
 
 Built on: [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) ([@modelcontextprotocol](https://github.com/modelcontextprotocol)), [sqlite-vec](https://github.com/asg017/sqlite-vec) (Alex Garcia), [pgvector](https://github.com/pgvector/pgvector) (Andrew Kane), [Pydantic](https://github.com/pydantic/pydantic), [Typer](https://github.com/fastapi/typer), [structlog](https://github.com/hynek/structlog). spaCy ([Explosion AI](https://github.com/explosion/spaCy)) is an optional extra.
-
----
-
-## Install
-
-```bash
-pip install thought-mcp                    # core + sqlite-vec + MCP
-pip install 'thought-mcp[all]'             # + production embeddings + NER
-uvx thought-mcp install --client cursor    # zero-install: pull + wire into Cursor in one command
-```
-
-## 30-second quickstart
-
-```bash
-thought start --client cursor    # creates config, wires Cursor's MCP settings, starts the server
-# (restart Cursor)               # done.
-```
-
-That's the whole onboarding. `thought start` is the fast path; under the hood it runs:
-
-1. `thought init` if no config exists — drops `thought.toml`, creates the SQLite DB, writes a `CLAUDE.md` so the LLM client knows how to use the tools, warms up the embedder.
-2. `thought install --client <name>` — auto-detects your client's config file, merges in the `mcpServers` entry (with a backup), idempotent on rerun.
-3. `thought serve` — runs a `doctor` precheck, then binds the MCP server on `127.0.0.1:8765`.
-
-### Auto-wiring MCP clients
-
-```bash
-thought install --detect                   # show each client's config path + whether it exists
-thought install --client cursor            # wire just Cursor
-thought install --client claude-code       # …or Claude Code
-thought install --all                      # wire every detected client at once
-```
-
-The installer supports **Claude Code, Cursor, Cline, Continue, Windsurf** and writes the same JSON block in the right file for each:
-
-```json
-{
-  "mcpServers": {
-    "thought": {
-      "command": "uvx",
-      "args": ["thought-mcp", "serve"]
-    }
-  }
-}
-```
-
-The pre-write file is backed up to `<config>.thought.bak`. Rerunning is a no-op if the entry already matches.
-
-### Manual install paths (if `--detect` can't find your client)
-
-- **Claude Code** — `~/.claude.json` (a `mcpServers` block at the top level)
-- **Cursor** — `~/.cursor/mcp.json`
-- **Cline** — VS Code `globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json` (or `~/.cline/cline_mcp_settings.json`)
-- **Continue** — `~/.continue/config.json`
-- **Windsurf** — `~/.codeium/windsurf/mcp_config.json`
-
-After the install completes and your client restarts, the MCP tools `remember` and `recall` are available to it. See **[Using THOUGHT inside Claude Code / Cursor / etc.](#using-thought-inside-claude-code--cursor--etc)** below for example interactions.
-
----
-
-## Using THOUGHT inside Claude Code / Cursor / etc.
-
-Once wired, your LLM client gains two tools — `remember(content, ...)` and `recall(query, ...)` — plus a `CLAUDE.md` hint that teaches it when to use them. You don't need to invoke them directly; most agents will call them automatically when the prompt implies persistence or recall. Below are concrete examples.
-
-### Pattern 1 — automatic remember on decisions
-
-```
-You:  We've decided to use Postgres for the v2 release. Note that down.
-Claude Code:
-  → calls remember(
-      content="We decided to use Postgres for the v2 release.",
-      scope="shared")
-  "Stored. I can pull this back later with recall('database plan')."
-```
-
-### Pattern 2 — automatic recall when context is needed
-
-```
-You:  What's our database plan?
-Claude Code:
-  → calls recall(query="database plan", scope="all")
-  "Based on what's in memory: for v2 we're using Postgres
-   (source_grounded, recorded 3 days ago)."
-```
-
-The `confidence_class` on each hit (`source_grounded` / `inferred` / `hallucination_risk`) tells the LLM how much to trust the recall result.
-
-### Pattern 3 — "as of" temporal queries (a structural advantage)
-
-```
-You:  What did we say about pricing on Jan 15?
-Claude Code:
-  → calls recall(
-      query="pricing",
-      as_of="2026-01-15T00:00:00Z",
-      as_of_kind="valid")
-  "On 2026-01-15: 'Pricing tiers were Free / Pro $19 / Team $99'.
-   (That changed on Feb 3 to Free / Pro $25 / Team $129 — but
-   recalling 'as of Jan 15' gives the historical state.)"
-```
-
-This is THOUGHT's most distinctive capability — OB1 and the Karpathy wiki structurally cannot answer "what was true on date X" because they don't track validity windows.
-
-### Pattern 4 — contradiction detection at write time
-
-```
-You:  Remember that the auth library is JWT.
-You:  Actually, remember that auth is now using sessions.
-Claude Code:
-  → second remember() returns contradictions_detected=[…]
-  "I've noted the change. There's a structural contradiction
-   logged between 'auth=JWT' and 'auth=sessions' — both are still
-   queryable, with sessions marked current."
-```
-
-The `CONTRADICTS` typed edge is **data**, not a warning — your agent can query for outstanding contradictions and prompt the user to resolve them.
-
-### Pattern 5 — private vs. shared scope for multi-user / multi-project
-
-```
-You:  Remember as a private note: I prefer 4-space indentation.
-Claude Code:
-  → remember(content=..., scope="private", owner_id="richard")
-  "Stored under your private scope. Won't surface in shared recalls."
-```
-
-A shared recall (default `scope="all"`) returns public facts plus the requester's own private facts; never another user's.
-
-### Tips for prompting the LLM client
-
-- **You rarely need to say "call remember"** — agents pick it up from phrases like "note that", "remember", "store this", "save for later".
-- **Force a recall** with phrases like "according to memory…", "what do we have on…", "as of date X…", or by prefixing with `@thought` in some clients.
-- **`CLAUDE.md` is the single best place** to tell the agent project-specific conventions (e.g. "always tag finance decisions with scope=private"). `thought init` drops a starter file in the working directory.
-
-### Calling the tools directly via CLI (when you want to)
-
-```bash
-thought ingest "Alice owns Acme Corp. Acme is part of HoldCo." --scope shared
-thought recall "who owns Acme"
-thought repl                              # interactive query shell
-thought stats                             # what's currently in memory
-thought forget "kendra%"                  # soft-delete with audit trail
-```
-
-The CLI is most useful for **bulk-loading** existing notes / docs / changelogs into memory before pointing your agent at it:
-
-```bash
-thought ingest --glob 'docs/**/*.md' --scope shared
-thought ingest --file CHANGELOG.md
-git log --since='1 week ago' --format='%s' | thought ingest --stdin --scope shared
-```
 
 ---
 

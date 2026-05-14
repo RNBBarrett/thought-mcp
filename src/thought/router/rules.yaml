@@ -1,0 +1,46 @@
+# Router rule set — VIBE / FACT / CHANGE classification.
+# Triggers are case-insensitive. Multiple matches across classes promote to HYBRID.
+
+vibe:
+  # Similarity / mood / association language.
+  - "\\bsimilar to\\b"
+  - "\\blike this\\b"
+  - "\\breminds me\\b"
+  - "\\bfind something\\b"
+  - "\\brelated to\\b"
+  - "\\bvibe of\\b"
+  - "\\bkind of like\\b"
+  - "\\bsomething like\\b"
+
+fact:
+  - "^who\\b"
+  - "^where\\b"
+  - "^which\\b"
+  - "^what is\\b"
+  - "^what's\\b"
+  - "\\bowns\\b"
+  - "\\bowned by\\b"
+  - "\\bpart of\\b"
+  - "\\breports to\\b"
+  - "\\bdepends on\\b"
+  - "\\bworks at\\b"
+
+change:
+  - "\\bwhen\\b"
+  - "\\bsince\\b"
+  - "\\bused to\\b"
+  - "\\bpreviously\\b"
+  - "\\bhistorically\\b"
+  - "\\bin \\d{4}\\b"
+  - "\\bas of\\b"
+  - "\\bsuperseded\\b"
+  - "\\bdeprecated\\b"
+  - "\\bever\\b"
+  - "\\bbefore\\b"
+  - "\\bafter\\b"
+  - "\\bhistory of\\b"
+  - "\\bcurrently\\b"
+  - "\\bnow\\b"
+  - "\\btoday\\b"
+  - "\\bpresent\\b"
+  - "\\bnowadays\\b"

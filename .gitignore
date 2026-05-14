@@ -1,0 +1,47 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# THOUGHT runtime
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.thought/
+thought.toml.local
+
+# Benchmark baselines (committed manually)
+tests/perf/.tmp/
+
+# Model cache (downloads)
+.cache/
+models/

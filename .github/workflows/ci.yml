@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          # 3.13 wheels for scipy + sqlite-vec are uneven at the time of
+          # writing; pin to the matrix entries we actually support.
+          - os: windows-latest
+            python: "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mcp]"
+
+      - name: Lint
+        run: |
+          ruff check src tests
+
+      - name: Type check
+        # mypy on src only; tests use heavy fixtures, gate later.
+        run: |
+          python -m mypy src --ignore-missing-imports || true
+
+      - name: Unit + integration tests
+        run: |
+          pytest tests/unit tests/comparison -q --cov=thought --cov-report=xml
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  perf:
+    name: Performance benchmarks
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mcp]"
+      - name: Run perf suite
+        run: pytest tests/perf -q -m perf
+      - name: Comparison harness
+        run: python -m tests.comparison.run
+      - name: Ablation study
+        run: python -m tests.comparison.ablation
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: docs/*.md

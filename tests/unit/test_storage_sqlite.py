@@ -42,7 +42,8 @@ def test_migrate_creates_all_tables(backend: SQLiteBackend) -> None:
 
 
 def test_schema_version_is_recorded(backend: SQLiteBackend) -> None:
-    assert backend.schema_version() == 1
+    # v0.2 migration bumps the version to 2.
+    assert backend.schema_version() == 2
 
 
 def test_upsert_source_dedupes_by_hash(backend: SQLiteBackend) -> None:

@@ -126,8 +126,26 @@ class SQLiteBackend(StorageBackend):
     # ---- lifecycle ----
 
     def migrate(self) -> None:
+        # Track applied migrations by filename so each file runs exactly once,
+        # even across multiple ``migrate()`` calls on the same DB. ``ALTER
+        # TABLE ADD COLUMN`` isn't idempotent in SQLite, so we can't rely on
+        # the migrations themselves being safe to re-run.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS applied_migrations ("
+            " filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        applied = {
+            r["filename"] for r in
+            self._conn.execute("SELECT filename FROM applied_migrations").fetchall()
+        }
         for sql_file in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+            if sql_file.name in applied:
+                continue
             self._conn.executescript(sql_file.read_text(encoding="utf-8"))
+            self._conn.execute(
+                "INSERT INTO applied_migrations (filename, applied_at) VALUES (?, ?)",
+                (sql_file.name, _utc_iso(_now_utc())),
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -200,16 +218,23 @@ class SQLiteBackend(StorageBackend):
         importance: float = 0.5,
         tier: str = "hot",
         attrs: dict[str, object] | None = None,
+        code_file: str | None = None,
+        code_language: str | None = None,
+        code_commit_sha: str | None = None,
     ) -> str:
         # Append-only: check for an existing currently-valid entity with same identity.
         # If one exists with valid_until IS NULL we reuse it; otherwise add a new row.
+        # For code entities, identity ALSO includes (code_file, code_commit_sha) so we
+        # don't merge functions of the same name from different files.
         canonical = _canon(name)
         existing = self._conn.execute(
             "SELECT id FROM entities WHERE canonical_name = ? AND type = ? "
             "AND scope = ? AND COALESCE(owner_id, '') = COALESCE(?, '') "
+            "AND COALESCE(code_file, '') = COALESCE(?, '') "
+            "AND COALESCE(code_commit_sha, '') = COALESCE(?, '') "
             "AND valid_until IS NULL "
             "LIMIT 1",
-            (canonical, type_, scope, owner_id),
+            (canonical, type_, scope, owner_id, code_file, code_commit_sha),
         ).fetchone()
         if existing is not None:
             return existing["id"]
@@ -220,8 +245,9 @@ class SQLiteBackend(StorageBackend):
             "INSERT INTO entities ("
             " id, type, name, canonical_name, owner_id, scope, tier, importance,"
             " valid_from, valid_until, learned_at, unlearned_at,"
-            " created_at, last_accessed_at, access_count, attrs_json"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, 0, ?)",
+            " created_at, last_accessed_at, access_count, attrs_json,"
+            " code_file, code_language, code_commit_sha"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, 0, ?, ?, ?, ?)",
             (
                 eid,
                 type_,
@@ -236,6 +262,9 @@ class SQLiteBackend(StorageBackend):
                 _utc_iso(now),
                 _utc_iso(now),
                 json.dumps(attrs or {}),
+                code_file,
+                code_language,
+                code_commit_sha,
             ),
         )
         return eid
@@ -273,6 +302,44 @@ class SQLiteBackend(StorageBackend):
             params,
         ).fetchall()
         return [self._row_to_entity(r) for r in rows]
+
+    def find_code_entity(
+        self,
+        *,
+        canonical_name: str,
+        scope_filter: ScopeFilter | None = None,
+        code_file: str | None = None,
+        type_: str | None = None,
+        code_commit_sha: str | None = None,
+    ) -> str | None:
+        """Look up a code entity ID by name + optional disambiguators.
+
+        Used by the call-graph resolver: given a callee name observed in a
+        function body, find the entity that name refers to. ``code_file``
+        narrows to intra-file calls; ``type_`` filters to function | method;
+        ``code_commit_sha`` pins to a specific snapshot.
+        """
+        clauses = ["canonical_name = ?", "valid_until IS NULL"]
+        params: list[object] = [_canon(canonical_name)]
+        if scope_filter is not None:
+            where_sql, sp = scope_filter.sql_where()
+            # ``where_sql`` references ``e.`` aliases; rewrite for table-only context.
+            clauses.append(where_sql.replace("e.", ""))
+            params.extend(sp)
+        if code_file is not None:
+            clauses.append("code_file = ?")
+            params.append(code_file)
+        if type_ is not None:
+            clauses.append("type = ?")
+            params.append(type_)
+        if code_commit_sha is not None:
+            clauses.append("code_commit_sha = ?")
+            params.append(code_commit_sha)
+        row = self._conn.execute(
+            f"SELECT id FROM entities WHERE {' AND '.join(clauses)} LIMIT 1",
+            params,
+        ).fetchone()
+        return row["id"] if row else None
 
     def list_entity_ids(self, scope_filter: ScopeFilter) -> set[str]:
         """Fast scope-membership lookup — IDs only, no Pydantic hydration.

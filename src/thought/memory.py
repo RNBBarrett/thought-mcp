@@ -24,9 +24,12 @@ from .storage.sqlite.backend import SQLiteBackend
 def _load_embedder(choice: str, *, dim: int) -> Embedder:
     if choice == "auto":
         # Production-grade if available, fall back gracefully.
-        try:
-            import sys
-
+        # Probe the underlying ``sentence_transformers`` package, not just our
+        # wrapper — the wrapper imports cleanly even when the real dep is
+        # missing (lazy load), so we have to check both.
+        import importlib.util
+        import sys
+        if importlib.util.find_spec("sentence_transformers") is not None:
             from .embeddings.sentence_transformer import (
                 SentenceTransformerEmbedder,
             )
@@ -35,13 +38,11 @@ def _load_embedder(choice: str, *, dim: int) -> Embedder:
                 "sentence-transformers/all-MiniLM-L6-v2 (384d, dense)\n"
             )
             return SentenceTransformerEmbedder()
-        except ImportError:
-            import sys
-            sys.stderr.write(
-                "[thought] auto-selected embedder: deterministic (test-grade). "
-                "Install 'thought-mcp[embeddings-local]' for production quality.\n"
-            )
-            return DeterministicEmbedder(dim=dim)
+        sys.stderr.write(
+            "[thought] auto-selected embedder: deterministic (test-grade). "
+            "Install 'thought-mcp[embeddings-local]' for production quality.\n"
+        )
+        return DeterministicEmbedder(dim=dim)
     if choice == "deterministic":
         return DeterministicEmbedder(dim=dim)
     if choice == "minilm":  # pragma: no cover — optional dep

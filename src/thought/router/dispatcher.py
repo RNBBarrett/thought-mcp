@@ -62,6 +62,8 @@ class Dispatcher:
             hits = self._dispatch_change(
                 query, limit, scope_filter, as_of=as_of, as_of_kind=as_of_kind,
             )
+        elif cls == QueryClass.CODE:
+            hits = self._dispatch_code(query, limit, scope_filter)
         else:
             hits = self._dispatch_hybrid(
                 query, limit, scope_filter, as_of=as_of, as_of_kind=as_of_kind,
@@ -225,6 +227,64 @@ class Dispatcher:
             if prev is None or hit.score > prev.score:
                 best[hit.entity.id] = hit
         return sorted(best.values(), key=lambda h: h.score, reverse=True)[:limit]
+
+    def _dispatch_code(
+        self, query: str, limit: int, scope_filter: ScopeFilter,
+    ) -> list[Hit]:
+        """CODE-class dispatch.
+
+        Three-step:
+        1. Resolve any explicit names in the query (e.g. ``authenticate_user``)
+           to entity IDs via the storage layer.
+        2. If we have at least one seed, run PageRank to surface
+           callers + structural dependents.
+        3. Fall back to vector search over signature/docstring embeddings
+           when no explicit name resolves.
+        """
+        # Extract candidate identifiers from the query — anything that looks
+        # like a snake_case or CamelCase name.
+        import re
+        candidates = re.findall(r"[A-Za-z_][A-Za-z0-9_]+", query)
+        # Filter out stopwords / common verbs.
+        stop = {
+            "what", "who", "where", "which", "how", "the", "a", "an", "is",
+            "are", "in", "on", "of", "for", "to", "from", "and", "or",
+            "callers", "calls", "callees", "impact", "function", "class",
+            "method", "module", "import",
+        }
+        candidates = [c for c in candidates if c.lower() not in stop and len(c) >= 3]
+
+        seed_ids: list[str] = []
+        for name in candidates:
+            eid = self._backend.find_code_entity(canonical_name=name)
+            if eid is not None:
+                seed_ids.append(eid)
+
+        if seed_ids:
+            scores = self._graph.personalized_pagerank(
+                seeds=seed_ids, scope_filter=scope_filter,
+            )
+            out: list[Hit] = []
+            for eid, score in sorted(
+                scores.items(), key=lambda kv: kv[1], reverse=True
+            ):
+                ent = self._backend.get_entity(eid)
+                if ent is None or ent.valid_until is not None:
+                    continue
+                if ent.type not in {"function", "method", "class", "module"}:
+                    continue
+                out.append(Hit(
+                    entity=ent, score=float(score), layer="graph",
+                    confidence_class="source_grounded",
+                    expansion_path=[], source_refs=[],
+                ))
+                if len(out) >= limit:
+                    break
+            if out:
+                return out
+
+        # Vector fallback — semantic search over the code embeddings.
+        return self._dispatch_vibe(query, limit, scope_filter)
 
     def _dispatch_hybrid(
         self,

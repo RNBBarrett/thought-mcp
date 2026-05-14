@@ -22,6 +22,7 @@ class QueryClass(StrEnum):
     FACT = "FACT"
     CHANGE = "CHANGE"
     HYBRID = "HYBRID"
+    CODE = "CODE"
 
 
 class ScopeFilter(BaseModel):

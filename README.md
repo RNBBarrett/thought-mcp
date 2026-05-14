@@ -13,6 +13,37 @@
 
 ---
 
+## ✨ New in v0.2 — Memory for AI coding agents
+
+v0.2 specialises the same architecture for the workflow with the strongest natural fit: **AI-assisted coding**. THOUGHT now parses your source with tree-sitter, builds a real function-call graph as typed edges, and stamps every fact with its git commit. The bi-temporal `as_of` queries you already had now answer *"what did the codebase look like at commit X?"* for free.
+
+```bash
+thought ingest-code src/                      # tree-sitter ingest, multi-language
+thought ingest-git . --mode full              # stamp every commit
+thought callers GraphLayer.personalized_pagerank
+#  #  score    type    entity                              file
+#  1  0.0132   method  Dispatcher._dispatch_code           Dispatcher
+#  2  0.0130   method  Dispatcher._dispatch_fact           Dispatcher
+#  3  0.0122   method  CodeLayer.impact_set                CodeLayer
+#  4  0.0110   method  CodeLayer.callers_of                CodeLayer
+thought impact authenticate_user              # what's affected if I change this?
+thought diff --from v1.0 --to HEAD            # set diff between two commits
+```
+
+**Real measurement on this codebase**: 38 files → 425 entities → 575 CALLS edges in **<250 ms**. The killer-demo query *"who calls GraphLayer.personalized_pagerank"* returns the four real callers ranked by Personalized PageRank in **60 ms** on a 1086-edge graph.
+
+What's new:
+
+- **AST-aware ingest** via tree-sitter — Python + TypeScript / JavaScript out of the box, multi-language plugin shape for the rest.
+- **Function-call-graph edges** — `CALLS`, `IMPORTS`, `INHERITS_FROM`, `OVERRIDES`, `DEFINES` as typed edges. The Graph Layer's HippoRAG-style PageRank then powers ranked callers / impact-set queries.
+- **Git-history stamping** — every entity carries `code_commit_sha`. `thought diff --from <sha1> --to <sha2>` returns the set difference of functions between two commits.
+- **New Router CODE class** — natural-language queries like *"who calls authenticate_user"* route through the call-graph machinery automatically.
+- **5 new CLI commands**: `ingest-code`, `ingest-git`, `callers`, `impact`, `diff`.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full v0.2 list. The v0.1 horizontal-memory surface below is unchanged — v0.2 is purely additive.
+
+---
+
 ## Why this exists
 
 The 2024–2026 wave of LLM memory products is split between two patterns, each with a structural limitation we wanted to fix in one system:
@@ -471,6 +502,21 @@ thought stats                     # entities / edges / sources / contradictions 
 thought repl                      # interactive shell — type queries, +text to remember
 thought forget 'kendra%'          # soft-delete by SQL LIKE pattern (audit-logged)
 thought consolidate               # run one consolidation cycle
+```
+
+### Code-vertical commands (v0.2)
+
+```bash
+thought ingest-code <path> [--glob '**/*.py'] [--lang python|typescript|auto]
+                                  # tree-sitter ingest — functions / classes / methods as entities
+thought ingest-git <repo> [--mode snapshot|full] [--paths '*.py,*.ts']
+                                  # commit-stamped ingest; --mode full walks every commit
+thought callers <name> [--file path] [--limit 10]
+                                  # direct callers ranked by HippoRAG PageRank
+thought impact  <name> [--file path] [--limit 20]
+                                  # transitive impact set: what's affected if you change <name>
+thought diff   --from <sha1> --to <sha2> [--file path]
+                                  # set diff of entities between two ingested commits
 ```
 
 ### Docker

@@ -44,3 +44,29 @@ change:
   - "\\btoday\\b"
   - "\\bpresent\\b"
   - "\\bnowadays\\b"
+
+# v0.2 — code-vertical query triggers.
+# CODE class signals the dispatcher to use CodeLayer methods (callers,
+# callees, impact) instead of generic graph/vector retrieval. A CODE
+# query crossed with CHANGE triggers HYBRID (e.g. "what changed in
+# auth.middleware since v1.0").
+code:
+  - "\\bfunction\\b"
+  - "\\bclass\\b"
+  - "\\bmethod\\b"
+  - "\\bmodule\\b"
+  - "\\bimport\\b"
+  - "\\bcalls?\\b"
+  - "\\bcallers?\\b"
+  - "\\bcallees?\\b"
+  - "\\bimpact( of)?\\b"
+  - "\\bwho calls\\b"
+  - "\\bdepends? on\\b"
+  - "\\bsubclass(es)?\\b"
+  - "\\binherits? from\\b"
+  - "\\boverrides?\\b"
+  - "\\bdefined in\\b"
+  - "\\b\\w+\\.(py|ts|tsx|js|jsx|mjs|cjs|go|rs|java|cpp|h|hpp)\\b"
+  - "\\bsince commit\\b"
+  - "\\bsince v\\d"
+  - "\\brefactor(ing)?\\b"

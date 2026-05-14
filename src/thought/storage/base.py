@@ -41,6 +41,9 @@ class StorageBackend(ABC):
         importance: float = 0.5,
         tier: str = "hot",
         attrs: dict[str, object] | None = None,
+        code_file: str | None = None,
+        code_language: str | None = None,
+        code_commit_sha: str | None = None,
     ) -> str: ...
 
     @abstractmethod

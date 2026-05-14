@@ -652,6 +652,262 @@ def consolidate(
 
 # ---------------------------------------------------------------- doctor
 
+# ---------------------------------------------------------------- code-vertical (v0.2)
+
+@app.command("ingest-code")
+def ingest_code_cmd(
+    path: Path = typer.Argument(..., help="File or directory to ingest."),
+    glob_pattern: str = typer.Option(
+        "**/*.py", "--glob", "-g",
+        help="Glob pattern (when path is a directory). Default: **/*.py.",
+    ),
+    lang: str = typer.Option(
+        "auto", "--lang", help="'auto' detects from extension; or 'python' / 'typescript'.",
+    ),
+    scope: str = typer.Option("shared"),
+    owner_id: str | None = typer.Option(None),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Ingest source code via tree-sitter (Python supported; TS arrives in v0.2.x).
+
+    Examples:
+        thought ingest-code src/auth.py
+        thought ingest-code src/ --glob '**/*.py'
+        thought ingest-code mypkg/ --lang python
+    """
+    from .ingest.code.call_graph import build_call_graph
+    from .ingest.code.pipeline import CodeIngestPipeline
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        pipe = CodeIngestPipeline(
+            backend=mem._backend, embedder=mem._embedder,
+            scope=scope, owner_id=owner_id,  # type: ignore[arg-type]
+        )
+        files = (
+            [path] if path.is_file()
+            else sorted(p for p in path.rglob(glob_pattern) if p.is_file())
+        )
+        if not files:
+            err_console.print(f"[red]no files matched[/red] {glob_pattern!r}")
+            raise typer.Exit(1)
+
+        from datetime import UTC, datetime
+        now = datetime.now(UTC)
+        total_entities = 0
+        total_calls = 0
+        root = path if path.is_dir() else path.parent
+
+        # Two-pass: ingest ALL files first (so cross-file references can
+        # resolve), then walk the call graph. Doing them per-file pollutes
+        # the resolver with stubs that win over real qualified methods on
+        # later files.
+        per_file: list[tuple[Path, str, str]] = []
+        with Progress(
+            SpinnerColumn(), TextColumn("[bold]{task.description}"),
+            BarColumn(), MofNCompleteColumn(),
+            console=err_console, transient=True,
+        ) as prog:
+            task = prog.add_task("pass 1/2: ingesting entities", total=len(files))
+            for f in files:
+                detected = lang if lang != "auto" else None
+                r = pipe.ingest_code_file(
+                    f, commit_sha=None, language=detected, now=now,
+                    repo_root=root,
+                )
+                total_entities += len(r.entity_ids)
+                rel = f.resolve().relative_to(root.resolve()).as_posix()
+                per_file.append((f, rel, r.source_id))
+                prog.advance(task)
+            task2 = prog.add_task("pass 2/2: building call graph", total=len(per_file))
+            for f, rel, source_id in per_file:
+                detected = lang if lang != "auto" else None
+                total_calls += build_call_graph(
+                    backend=mem._backend, file_path=rel,
+                    source=f.read_text(encoding="utf-8"),
+                    language=detected or "python",
+                    commit_sha=None,
+                    scope=scope, owner_id=owner_id,  # type: ignore[arg-type]
+                    source_ref=source_id, now=now,
+                )
+                prog.advance(task2)
+
+        table = Table(title="Code-ingest summary", show_header=False, border_style="cyan")
+        table.add_column(style="bold")
+        table.add_column(justify="right")
+        table.add_row("files processed", str(len(files)))
+        table.add_row("entities created", str(total_entities))
+        table.add_row("CALLS edges", str(total_calls))
+        console.print(table)
+    finally:
+        mem.close()
+
+
+@app.command("ingest-git")
+def ingest_git_cmd(
+    repo_path: Path = typer.Argument(Path("."), help="Path to a git repo."),
+    mode: str = typer.Option(
+        "snapshot", "--mode", help="'snapshot' (HEAD only) or 'full' (every commit).",
+    ),
+    paths: str = typer.Option(
+        "*.py", "--paths", help="Comma-separated glob patterns to ingest.",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Ingest a git repository's code with commit-stamped provenance.
+
+    ``--mode snapshot`` (default) ingests only HEAD. ``--mode full`` walks
+    every commit and stamps each entity with its commit SHA — enables
+    ``thought diff --from <sha1> --to <sha2>`` queries.
+    """
+    from .ingest.code.git_pipeline import GitIngestPipeline
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        pipe = GitIngestPipeline(
+            backend=mem._backend, embedder=mem._embedder,
+        )
+        from datetime import UTC, datetime
+        path_patterns = tuple(p.strip() for p in paths.split(",") if p.strip())
+        with Progress(
+            SpinnerColumn(), TextColumn("[bold]{task.description}"),
+            console=err_console, transient=True,
+        ) as prog:
+            prog.add_task(f"git-ingest ({mode})", total=None)
+            r = pipe.ingest_history(
+                repo_path, mode=mode,  # type: ignore[arg-type]
+                paths=path_patterns, now=datetime.now(UTC),
+            )
+
+        table = Table(title="Git-ingest summary", show_header=False, border_style="cyan")
+        table.add_column(style="bold")
+        table.add_column(justify="right")
+        table.add_row("HEAD", r.head_sha[:12] + "…")
+        table.add_row("mode", r.mode)
+        table.add_row("commits visited", str(r.commits_visited))
+        table.add_row("files ingested", str(r.files_ingested))
+        table.add_row("CALLS edges", str(r.call_edges))
+        console.print(table)
+    finally:
+        mem.close()
+
+
+@app.command()
+def callers(
+    name: str = typer.Argument(..., help="Function or method name."),
+    limit: int = typer.Option(10),
+    code_file: str | None = typer.Option(
+        None, "--file", help="Restrict to this file.",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show direct callers of a function/method, ranked by PageRank."""
+    from .layers.code import CodeLayer
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        hits = CodeLayer(mem._backend).callers_of(
+            name, code_file=code_file, limit=limit,
+        )
+    finally:
+        mem.close()
+    if not hits:
+        err_console.print(f"[red]no callers found for[/red] {name!r}")
+        raise typer.Exit(1)
+    table = Table(
+        title=f"Callers of [bold]{name}[/bold]",
+        border_style="cyan",
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("score", justify="right")
+    table.add_column("type")
+    table.add_column("entity")
+    table.add_column("file")
+    for i, h in enumerate(hits, 1):
+        table.add_row(
+            str(i), f"{h.score:.4f}", h.entity.type, h.entity.name,
+            h.entity.attrs.get("class") or h.entity.canonical_name,
+        )
+    console.print(table)
+
+
+@app.command()
+def impact(
+    name: str = typer.Argument(..., help="Function or method name."),
+    limit: int = typer.Option(20),
+    code_file: str | None = typer.Option(None, "--file"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Transitive impact set — what's affected if you change ``name``.
+
+    Seeds Personalized PageRank at ``name`` and walks the call graph
+    bidirectionally; returns the highest-scoring affected entities.
+    """
+    from .layers.code import CodeLayer
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        hits = CodeLayer(mem._backend).impact_set(
+            name, code_file=code_file, limit=limit,
+        )
+    finally:
+        mem.close()
+    if not hits:
+        err_console.print(f"[red]no impact set for[/red] {name!r}")
+        raise typer.Exit(1)
+    table = Table(
+        title=f"Impact set: what's affected by changing [bold]{name}[/bold]",
+        border_style="cyan",
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("score", justify="right")
+    table.add_column("type")
+    table.add_column("entity")
+    for i, h in enumerate(hits, 1):
+        table.add_row(
+            str(i), f"{h.score:.4f}", h.entity.type, h.entity.name,
+        )
+    console.print(table)
+
+
+@app.command()
+def diff(
+    from_sha: str = typer.Option(..., "--from", help="Earlier commit SHA."),
+    to_sha: str = typer.Option(..., "--to", help="Later commit SHA."),
+    code_file: str | None = typer.Option(None, "--file"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show entities added/removed between two ingested commit SHAs.
+
+    Both SHAs must have been ingested previously via ``thought ingest-git --mode full``.
+    """
+    from .layers.code import CodeLayer
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        d = CodeLayer(mem._backend).diff(
+            from_sha=from_sha, to_sha=to_sha, code_file=code_file,
+        )
+    finally:
+        mem.close()
+
+    def _render(title: str, entities, style: str) -> None:
+        if not entities:
+            return
+        t = Table(title=title, border_style=style)
+        t.add_column("type")
+        t.add_column("name")
+        t.add_column("file")
+        for e in entities:
+            t.add_row(e.type, e.name, e.attrs.get("file_path", "") or "")
+        console.print(t)
+
+    _render(f"Added in {to_sha[:8]}", d["added"], "green")
+    _render(f"Removed since {from_sha[:8]}", d["removed"], "red")
+    if not (d["added"] or d["removed"]):
+        console.print("[dim]no differences[/dim]")
+
+
 @app.command()
 def doctor() -> None:
     """Deep environment health check."""

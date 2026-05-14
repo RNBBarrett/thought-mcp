@@ -27,6 +27,7 @@ class _Compiled:
     vibe: list[re.Pattern[str]]
     fact: list[re.Pattern[str]]
     change: list[re.Pattern[str]]
+    code: list[re.Pattern[str]]
 
 
 class RuleBasedClassifier:
@@ -35,6 +36,7 @@ class RuleBasedClassifier:
             vibe=[re.compile(p, re.I) for p in rules.get("vibe", [])],
             fact=[re.compile(p, re.I) for p in rules.get("fact", [])],
             change=[re.compile(p, re.I) for p in rules.get("change", [])],
+            code=[re.compile(p, re.I) for p in rules.get("code", [])],
         )
 
     @classmethod
@@ -47,16 +49,24 @@ class RuleBasedClassifier:
             "vibe": sum(1 for p in self._rules.vibe if p.search(query)),
             "fact": sum(1 for p in self._rules.fact if p.search(query)),
             "change": sum(1 for p in self._rules.change if p.search(query)),
+            "code": sum(1 for p in self._rules.code if p.search(query)),
         }
         nonzero = [(name, c) for name, c in counts.items() if c > 0]
         if not nonzero:
             # Default: treat undecorated queries as VIBE (semantic search).
             return QueryClass.VIBE, counts
-        if len(nonzero) >= 2:
+        # Code + change combine into HYBRID (e.g. "what calls X since v1.0").
+        # Code on its own is its own class — distinct from FACT because the
+        # dispatch uses CodeLayer's call-graph helpers, not generic PageRank
+        # seeded by NER hits.
+        if counts["code"] > 0 and counts["change"] > 0:
             return QueryClass.HYBRID, counts
-        winner = nonzero[0][0]
+        if len(nonzero) >= 2 and counts["code"] == 0:
+            return QueryClass.HYBRID, counts
+        winner = max(counts.items(), key=lambda kv: kv[1])[0]
         return {
             "vibe": QueryClass.VIBE,
             "fact": QueryClass.FACT,
             "change": QueryClass.CHANGE,
+            "code": QueryClass.CODE,
         }[winner], counts

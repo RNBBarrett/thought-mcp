@@ -80,7 +80,7 @@ def main(
 CLAUDE_MD_TEMPLATE = """\
 # THOUGHT — agent-facing usage
 
-This project uses [thought-mcp](https://github.com/rbarrett-indeed/thought-mcp)
+This project uses [thought-mcp](https://github.com/RNBBarrett/thought-mcp)
 as a persistent memory server. It exposes two MCP tools:
 
 - `remember(content, scope='private', owner_id=None)` — stores a piece of text,

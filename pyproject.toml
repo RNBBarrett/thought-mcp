@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thought-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. A local MCP memory server with bi-temporal graph + vector + temporal layers, a query router, and a consolidation engine."
 readme = "README.md"
 license = "MIT"
@@ -35,6 +35,10 @@ dependencies = [
     "psutil>=5.9",
     "sqlite-vec>=0.1.6",
     "rich>=13.0",
+    # The MCP server can't start without these — they're not really optional
+    # for the typical install path (``thought serve``). The ``[mcp]`` extra is
+    # kept as an alias for backward compatibility but is now a no-op.
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]

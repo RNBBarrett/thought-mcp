@@ -196,3 +196,59 @@ def install(
 
 def install_many(clients: Iterable[ClientName]) -> list[ClientInstallResult]:
     return [install(c) for c in clients]
+
+
+# ---------------------------------------------------------------- upgrade
+
+def pin_server_block(
+    *, version: str | None = None,
+    command: str = "uvx",
+    extras: tuple[str, ...] = ("mcp", "sqlite-vec"),
+) -> dict:
+    """Return an ``mcpServers`` block that pins a specific ``thought-mcp`` version.
+
+    Uses ``uvx --from "thought-mcp[mcp,sqlite-vec]==<ver>" thought serve``.
+    The extras are mandatory in practice — the server crashes at startup
+    without ``mcp``; the ANN path is unusably slow without ``sqlite-vec``.
+    uvx re-resolves the named version each invocation, so cached older
+    versions are bypassed without any user-visible cache management.
+
+    ``version=None`` pins to the running CLI's ``__version__``.
+    """
+    if version is None:
+        from . import __version__
+        version = __version__
+    extras_str = f"[{','.join(extras)}]" if extras else ""
+    return {
+        "command": command,
+        "args": ["--from", f"thought-mcp{extras_str}=={version}", "thought", "serve"],
+    }
+
+
+def upgrade(
+    client: ClientName,
+    *,
+    version: str | None = None,
+    server_name: str = "thought",
+    backup: bool = True,
+) -> ClientInstallResult:
+    """Update the ``thought`` entry in ``client``'s config to pin a version.
+
+    Same safety guarantees as ``install``: idempotent on rerun, backs up
+    the existing config before writing, refuses to touch non-JSON or
+    non-object files.
+    """
+    return install(
+        client,
+        server_name=server_name,
+        block=pin_server_block(version=version),
+        backup=backup,
+    )
+
+
+def upgrade_many(
+    clients_to_upgrade: Iterable[ClientName],
+    *,
+    version: str | None = None,
+) -> list[ClientInstallResult]:
+    return [upgrade(c, version=version) for c in clients_to_upgrade]

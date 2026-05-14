@@ -313,6 +313,78 @@ def install(
     )
 
 
+# ---------------------------------------------------------------- upgrade
+
+@app.command()
+def upgrade(
+    client: str | None = typer.Option(
+        None, "--client", "-c",
+        help="Client to upgrade: claude-code, cursor, cline, continue, windsurf.",
+    ),
+    all_clients: bool = typer.Option(
+        False, "--all", help="Upgrade every detected client.",
+    ),
+    version: str | None = typer.Option(
+        None, "--version", "-V",
+        help="Specific version to pin (e.g. 0.2.0). Default: this CLI's version.",
+    ),
+) -> None:
+    """Re-pin one or all MCP clients to a specific thought-mcp version.
+
+    Forces ``uvx`` to fetch the named version instead of using its cached
+    older copy. Use this whenever you upgrade ``thought-mcp`` itself and
+    want your IDE's MCP server to actually pick up the new version on
+    next restart.
+
+    Examples:
+        thought upgrade --all                  # pin every client to this CLI's version
+        thought upgrade --client cursor -V 0.2.1
+    """
+    target_version = version or __version__
+    if all_clients:
+        targets: tuple[str, ...] = mcp_clients.ALL_CLIENTS
+    elif client is not None:
+        if client not in mcp_clients.ALL_CLIENTS:
+            err_console.print(
+                f"[red]unknown client {client!r}[/red] — "
+                f"choose from {', '.join(mcp_clients.ALL_CLIENTS)} or use --all"
+            )
+            raise typer.Exit(2)
+        targets = (client,)
+    else:
+        err_console.print(
+            "[red]specify --client <name> or --all[/red] "
+            f"(known clients: {', '.join(mcp_clients.ALL_CLIENTS)})"
+        )
+        raise typer.Exit(2)
+
+    table = Table(
+        title=f"Upgrade results — pinned to thought-mcp=={target_version}",
+        border_style="cyan",
+    )
+    table.add_column("Client", style="bold")
+    table.add_column("Status")
+    table.add_column("Path")
+    for r in mcp_clients.upgrade_many(targets, version=target_version):  # type: ignore[arg-type]
+        style = {
+            "installed": "green",
+            "already_present": "yellow",
+            "no_path": "dim",
+            "error": "red",
+        }[r.status]
+        table.add_row(
+            r.client,
+            f"[{style}]{r.status}[/{style}]",
+            str(r.path) if r.path else "—",
+        )
+        if r.status == "error":
+            err_console.print(f"[red]error[/red] ({r.client}): {r.detail}")
+    console.print(table)
+    console.print(
+        "[dim]restart your client(s) to pick up the new MCP server version.[/dim]"
+    )
+
+
 # ---------------------------------------------------------------- start
 
 @app.command()

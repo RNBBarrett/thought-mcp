@@ -7,6 +7,35 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.1] — 2026-05-14 — Upgrade command + uvx-cache fix + critical MCP-startup fix
+
+### Fixed
+- **CRITICAL:** ``mcp`` is now a core dependency, not an optional extra.
+  v0.2.0's ``uvx --from thought-mcp==0.2.0 thought serve`` would crash at
+  startup with ``ModuleNotFoundError: No module named 'mcp'`` because
+  uvx installs only core deps when ``--from`` doesn't include extras.
+  The ``[mcp]`` extra is kept as a no-op alias so existing install
+  recipes don't break.
+- **`thought upgrade`** now generates configs that include the right
+  extras: ``uvx --from "thought-mcp[mcp,sqlite-vec]==X.Y.Z" thought serve``.
+- Last lingering reference to `rbarrett-indeed/thought-mcp` in the
+  ``CLAUDE.md`` template inside ``cli.py`` (now ``RNBBarrett/thought-mcp``).
+- CI workflow's `pip install` now includes the ``[code]`` extra so the
+  tree-sitter / call-graph tests added in v0.2.0 actually run in CI.
+
+### Added
+- **`thought upgrade --client <name>` / `--all` / `--version X.Y.Z`** —
+  re-pins MCP client configs to a specific ``thought-mcp`` version using
+  ``uvx --from "thought-mcp[mcp,sqlite-vec]==<ver>" thought serve``.
+  Forces uvx to fetch the named version on next IDE restart instead of
+  reusing cached older builds. Default ``version`` is the running CLI's
+  ``__version__``.
+- **`clients.pin_server_block(version=...)`** helper + **`clients.upgrade()`**
+  / **`clients.upgrade_many()`** functions backing the new CLI command
+  (reuses the existing ``install`` machinery for backups + atomic writes).
+
+---
+
 ## [0.2.0] — 2026-05-13 — Memory for AI coding agents
 
 This release specialises THOUGHT for AI-assisted coding workflows. The
@@ -153,5 +182,6 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.2.1]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.1
 [0.2.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.1.0

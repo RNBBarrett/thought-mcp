@@ -43,7 +43,7 @@ def test_as_of_world_time_filters_by_valid_window(backend, temporal) -> None:
     backend.supersede(old_id=old, new_id=old, source_ref=src, at=base + timedelta(days=90))
 
     # Fact valid Apr onward.
-    new = backend.upsert_entity(
+    backend.upsert_entity(
         type_="PREF", name="nike", scope="private", owner_id="kendra",
         valid_from=base + timedelta(days=90),
         learned_at=base + timedelta(days=90),

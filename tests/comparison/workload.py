@@ -49,7 +49,7 @@ def _person_company_pairs():
         "Acme", "Beacon", "Comet", "Dynamo", "Echo",
         "Fjord", "Glacier", "Helix", "Indigo", "Juno",
     ]
-    return list(zip(persons, companies))
+    return list(zip(persons, companies, strict=True))
 
 
 def build_workload() -> Workload:
@@ -105,7 +105,7 @@ def build_workload() -> Workload:
             RecallCase("FACT", f"who owns {c}", (p.lower(), c.lower()))
         )
     # five more relational queries about the holdco chain
-    for p, c in pairs[:5]:
+    for _p, c in pairs[:5]:
         fact_cases.append(
             RecallCase("FACT", f"what is {c} part of", (c.lower(),))
         )

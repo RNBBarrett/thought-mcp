@@ -56,7 +56,7 @@ def test_ingest_dedupes_by_content_hash(pipeline) -> None:
 
 
 def test_ingest_extracts_entities_from_simple_text(pipeline) -> None:
-    result = pipeline.ingest(
+    pipeline.ingest(
         content="Kendra prefers Nike.",
         scope="private", owner_id="kendra",
         now=datetime.now(UTC),

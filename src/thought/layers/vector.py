@@ -216,7 +216,7 @@ class VectorLayer:
         depth: int,
         scope_ids: set[str],
     ) -> list[tuple[str, float]]:
-        expanded: dict[str, float] = {eid: score for eid, score in seeds}
+        expanded: dict[str, float] = dict(seeds)
         frontier: list[tuple[str, float, int]] = [(eid, score, 0) for eid, score in seeds]
         while frontier:
             current, base_score, dist = frontier.pop(0)

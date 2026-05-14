@@ -47,7 +47,7 @@ class SentenceTransformerEmbedder:
         self._model_name = model_name
         self._dim = dim
         self._device = device
-        self._model: "SentenceTransformer | None" = None
+        self._model: SentenceTransformer | None = None
         self._show_progress = show_progress
 
     @property
@@ -64,7 +64,7 @@ class SentenceTransformerEmbedder:
     def dim(self) -> int:
         return self._dim
 
-    def _ensure_loaded(self) -> "SentenceTransformer":
+    def _ensure_loaded(self) -> SentenceTransformer:
         if self._model is not None:
             return self._model
         if self._show_progress:

@@ -11,10 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from thought.memory import Memory
-from thought.router.dispatcher import Dispatcher
-from thought.storage.sqlite.backend import SQLiteBackend
 
-from .run import _hit_correct, _names_from_thought, run_thought
+from .run import _hit_correct, _names_from_thought
 from .workload import build_workload, case_as_of, now_anchored, step_now
 
 
@@ -91,6 +89,7 @@ def run(out_path: str = "docs/ablation.md") -> None:
                         max_iter=30, tolerance=1e-6):
         """Forward-only PageRank — what we'd have without HippoRAG."""
         from collections import defaultdict, deque
+
         from thought.models import ScopeFilter
         scope_filter = scope_filter or ScopeFilter(scope="all")
         allowed = {e.id for e in self._backend.list_entities(scope_filter)}

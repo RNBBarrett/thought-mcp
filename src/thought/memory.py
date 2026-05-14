@@ -25,10 +25,11 @@ def _load_embedder(choice: str, *, dim: int) -> Embedder:
     if choice == "auto":
         # Production-grade if available, fall back gracefully.
         try:
-            from .embeddings.sentence_transformer import (  # noqa: F401
+            import sys
+
+            from .embeddings.sentence_transformer import (
                 SentenceTransformerEmbedder,
             )
-            import sys
             sys.stderr.write(
                 "[thought] auto-selected embedder: "
                 "sentence-transformers/all-MiniLM-L6-v2 (384d, dense)\n"
@@ -79,7 +80,7 @@ class Memory:
         # Recall LRU: (key) → RecallResult. Invalidates implicitly via
         # write_version embedded in the key — bumped writes don't share keys
         # with pre-write recalls.
-        self._recall_cache: "collections.OrderedDict[tuple, RecallResult]" = (
+        self._recall_cache: collections.OrderedDict[tuple, RecallResult] = (
             collections.OrderedDict()
         )
         self._recall_cache_size = recall_cache_size
@@ -116,7 +117,7 @@ class Memory:
         self,
         *,
         content: str,
-        source_ref: str | None = None,  # noqa: ARG002 — reserved for v0.2
+        source_ref: str | None = None,
         scope: Literal["shared", "private"] = "private",
         owner_id: str | None = None,
         now: datetime | None = None,

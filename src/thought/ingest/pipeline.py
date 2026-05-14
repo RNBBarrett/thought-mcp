@@ -19,14 +19,14 @@ Two write paths:
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
 
 from ..embeddings.base import Embedder, vector_to_bytes
 from ..models import ContradictionRef, RememberResult, ScopeName
 from ..storage.sqlite.backend import SQLiteBackend
-from .entities import EntityDraft, TripleDraft, extract, jaccard, triple_fingerprint
+from .entities import TripleDraft, extract, jaccard, triple_fingerprint
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class IngestPipeline:
         *,
         backend: SQLiteBackend,
         embedder: Embedder,
-        contextualizer=None,  # noqa: ANN001 — optional callable(content) -> str
+        contextualizer=None,
         jaccard_threshold: float = 0.7,
     ) -> None:
         self._backend = backend
@@ -77,7 +77,7 @@ class IngestPipeline:
         content: str,
         scope: ScopeName,
         owner_id: str | None = None,
-        source_ref_hint: str | None = None,  # noqa: ARG002
+        source_ref_hint: str | None = None,
         now: datetime,
         unique_predicates: set[str] | None = None,
     ) -> IngestResult:

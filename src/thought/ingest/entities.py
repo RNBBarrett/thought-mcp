@@ -43,7 +43,7 @@ class EntityDraft:
 class TripleDraft:
     subject: EntityDraft
     predicate: str
-    object: EntityDraft  # noqa: A003 — matches the SPO term
+    object: EntityDraft
 
 
 def _split_sentences(text: str) -> list[str]:

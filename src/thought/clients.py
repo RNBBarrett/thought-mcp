@@ -28,9 +28,10 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Literal
 
 ClientName = Literal["claude-code", "cursor", "cline", "continue", "windsurf"]
 ALL_CLIENTS: tuple[ClientName, ...] = (

@@ -17,7 +17,6 @@ Commands:
 from __future__ import annotations
 
 import glob as _glob
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -33,9 +32,9 @@ for _stream in (sys.stdout, sys.stderr):
 import typer
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
-from rich.table import Table
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.prompt import Prompt
+from rich.table import Table
 
 from . import __version__
 from . import clients as mcp_clients
@@ -143,7 +142,7 @@ def init(
     mem = Memory.open(db_path=db_path, embedder_choice=embedder, embedder_dim=384)
     if not quick and embedder == "auto":
         try:
-            mem._embedder.embed("warmup")  # noqa: SLF001
+            mem._embedder.embed("warmup")
         except Exception as e:  # pragma: no cover
             err_console.print(f"[yellow]embedder warmup skipped: {e}[/yellow]")
     mem.close()
@@ -221,7 +220,7 @@ def serve(
         settings.server.port = port
     mem = _open_memory(settings)
     if settings.consolidation.enabled:
-        mem._consolidator.start()  # noqa: SLF001
+        mem._consolidator.start()
     from .server import build_app
     mcp_app = build_app(mem)
     err_console.print(
@@ -471,7 +470,7 @@ _CONFIDENCE_STYLE = {
 }
 
 
-def _render_recall(query: str, result) -> None:  # noqa: ANN001
+def _render_recall(query: str, result) -> None:
     header = (
         f"[bold]{query}[/bold]   [dim]class={result.query_class.value}  "
         f"elapsed={result.elapsed_ms:.1f}ms  "
@@ -674,7 +673,7 @@ def doctor() -> None:
     )
 
     try:
-        import sqlite_vec  # noqa: F401
+        import sqlite_vec
         ver = getattr(sqlite_vec, "__version__", "unknown")
         table.add_row("sqlite-vec", f"[green]installed[/green] (v{ver})")
         # Try loading.

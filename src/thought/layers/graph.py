@@ -38,7 +38,7 @@ class GraphLayer:
         # SQL scan + COO→CSR conversion + column normalisation) dominates
         # the global-PPR path; caching it makes repeat FACT queries on the
         # same KB near-free.
-        self._mat_cache: dict[tuple, tuple[int, "sparse.csr_matrix", dict[str, int]]] = {}
+        self._mat_cache: dict[tuple, tuple[int, sparse.csr_matrix, dict[str, int]]] = {}
 
     # ---------------------------------------------------------------- neighbors
 
@@ -212,7 +212,7 @@ class GraphLayer:
 
     def _get_cached_transition_matrix(
         self, allowed: set[str]
-    ) -> tuple["sparse.csr_matrix", dict[str, int]]:
+    ) -> tuple[sparse.csr_matrix, dict[str, int]]:
         """Return the transition matrix, rebuilding only on write-version bump.
 
         Cache key includes the scope's allowed-set fingerprint so different
@@ -234,7 +234,7 @@ class GraphLayer:
 
     def _build_transition_matrix(
         self, allowed: set[str]
-    ) -> tuple["sparse.csr_matrix", dict[str, int]]:
+    ) -> tuple[sparse.csr_matrix, dict[str, int]]:
         """Construct the column-stochastic transition matrix for global PPR.
 
         We use the HippoRAG bidirectional convention: every directed edge

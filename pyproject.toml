@@ -107,7 +107,20 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "RUF", "SIM", "C4"]
-ignore = ["E501"]
+ignore = [
+    "E501",   # line too long — black/ruff format handles this
+    "RUF001", # ambiguous unicode in strings  — we use × / α / − deliberately
+    "RUF002", # ambiguous unicode in docstrings — same reason
+    "RUF003", # ambiguous unicode in comments — same reason
+    "SIM105", # contextlib.suppress — try/except/pass is clearer for one-liners
+    "SIM108", # ternary — sometimes if/else is clearer
+    "B008",   # function call in arg default — Typer's intended API for typer.Option
+]
+
+[tool.ruff.lint.per-file-ignores]
+# cli.py reconfigures stdio to UTF-8 before importing typer/rich; that has to
+# come BEFORE those imports run, so E402 is intentional here.
+"src/thought/cli.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"

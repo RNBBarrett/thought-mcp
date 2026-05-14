@@ -1,5 +1,12 @@
 # THOUGHT
 
+[![PyPI](https://img.shields.io/pypi/v/thought-mcp.svg)](https://pypi.org/project/thought-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/thought-mcp.svg)](https://pypi.org/project/thought-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://github.com/RNBBarrett/thought-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/RNBBarrett/thought-mcp/actions/workflows/ci.yml)
+[![Docker](https://github.com/RNBBarrett/thought-mcp/actions/workflows/docker.yml/badge.svg)](https://github.com/RNBBarrett/thought-mcp/actions/workflows/docker.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-thought--mcp-blue?logo=docker)](https://github.com/RNBBarrett/thought-mcp/pkgs/container/thought-mcp)
+
 **T**emporal **H**ierarchical **O**bject **U**nion & **G**raph **H**ybrid **T**oolkit — a local MCP memory server that gives any LLM a persistent, auditable memory fabric on your own machine.
 
 > OB1 stores your thoughts. Karpathy's wiki compiles your knowledge. **THOUGHT** remembers with provenance, understands relationships, detects contradictions, never forgets what used to be true — and routes every query to the right mathematical structure before touching a single byte of data.

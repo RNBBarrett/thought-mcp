@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. A local MCP memory server with bi-temporal graph + vector + temporal layers, a query router, and a consolidation engine."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Richard Barrett" }]
 keywords = ["mcp", "memory", "llm", "knowledge-graph", "graphrag", "vector-search", "temporal", "ai"]
 classifiers = [
@@ -17,7 +17,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -102,7 +101,7 @@ exclude_lines = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 src = ["src"]
 
 [tool.ruff.lint]
@@ -123,7 +122,7 @@ ignore = [
 "src/thought/cli.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 warn_unreachable = true
 explicit_package_bases = true

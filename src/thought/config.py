@@ -9,10 +9,10 @@ Settings come from (in priority order):
 from __future__ import annotations
 
 import os
+import tomllib
 from pathlib import Path
 from typing import Literal
 
-import tomllib
 from pydantic import BaseModel, ConfigDict, Field
 
 

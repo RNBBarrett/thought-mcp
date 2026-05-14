@@ -539,7 +539,7 @@ python -m tests.comparison.run       # rebuilds docs/comparison.md
 python -m tests.comparison.ablation  # rebuilds docs/ablation.md
 ```
 
-Coverage target: 85% on `src/thought`. CI matrix runs Python 3.10/3.11/3.12/3.13 × Ubuntu/macOS/Windows on every push (see `.github/workflows/ci.yml`). Tagging `v*` triggers `release.yml` (PyPI trusted publishing) and `docker.yml` (multi-arch GHCR image).
+Coverage target: 85% on `src/thought`. CI matrix runs Python 3.11/3.12/3.13 × Ubuntu/macOS/Windows on every push (see `.github/workflows/ci.yml`). Tagging `v*` triggers `release.yml` (PyPI trusted publishing) and `docker.yml` (multi-arch GHCR image).
 
 ---
 

@@ -101,7 +101,17 @@ class SQLiteBackend(StorageBackend):
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
-        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        # ``check_same_thread=False`` is required because (a) the MCP server
+        # dispatches each tool call into a worker thread via
+        # ``asyncio.to_thread`` so the connection is touched from a thread
+        # different from the one that created it, and (b) the consolidation
+        # engine runs in its own background thread. SQLite's C-level mutex
+        # (FULLMUTEX, the Python default) serializes access at the engine
+        # level, so this is safe in practice; the Python ``check_same_thread``
+        # guard is a debug aid, not a correctness requirement.
+        self._conn = sqlite3.connect(
+            self.path, isolation_level=None, check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         # Perf tuning: larger page cache, memory-mapped reads, NORMAL sync

@@ -2,7 +2,8 @@
 
 Commands:
 - ``thought init``               — create db + config + CLAUDE.md hint
-- ``thought serve``              — start the MCP server (Streamable HTTP)
+- ``thought serve``              — start the MCP server (stdio by default;
+                                   ``--transport streamable-http`` for HTTP)
 - ``thought ingest TEXT``        — one-shot remember from the command line
 - ``thought ingest --file PATH`` — ingest a single file
 - ``thought ingest --glob PAT``  — bulk-ingest matching files (one per item)
@@ -127,8 +128,14 @@ def init(
     """Create database file + config + agent-facing CLAUDE.md."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     if not config.exists():
+        # Use POSIX-style separators in the TOML so Windows paths like
+        # ``C:\Users\...\thought.db`` don't blow up the TOML parser on the
+        # next CLI call — backslashes in TOML basic strings are escape
+        # sequences (``\U`` / ``\x`` etc.). SQLite accepts forward slashes
+        # on Windows.
+        db_path_for_toml = db_path.replace("\\", "/")
         config.write_text(
-            f'db_path = "{db_path}"\n\n[embedding]\nchoice = "{embedder}"\ndim = 384\n',
+            f'db_path = "{db_path_for_toml}"\n\n[embedding]\nchoice = "{embedder}"\ndim = 384\n',
             encoding="utf-8",
         )
         console.print(f"  [ok] wrote [bold]{config}[/bold]")
@@ -202,13 +209,30 @@ def _resolve_config(config: Path | None) -> Path:
 @app.command()
 def serve(
     config: Path = typer.Option(Path("thought.toml"), help="Config file."),
-    host: str | None = typer.Option(None, help="Bind host."),
-    port: int | None = typer.Option(None, help="Bind port."),
+    host: str | None = typer.Option(None, help="Bind host (streamable-http only)."),
+    port: int | None = typer.Option(None, help="Bind port (streamable-http only)."),
+    transport: str = typer.Option(
+        "stdio", "--transport", "-t",
+        help="MCP transport: 'stdio' (default, used by MCP-client child-process invocations) "
+             "or 'streamable-http' (binds an HTTP listener — useful for local dev / remote clients).",
+    ),
     skip_precheck: bool = typer.Option(
-        False, "--skip-precheck", help="Skip the doctor precheck before binding.",
+        False, "--skip-precheck", help="Skip the doctor precheck before serving.",
     ),
 ) -> None:
-    """Start the MCP server."""
+    """Start the MCP server.
+
+    Default transport is stdio: every MCP client config wired up by
+    ``thought install`` / ``thought upgrade`` invokes
+    ``uvx --from "thought-mcp[mcp,sqlite-vec]==X" thought serve`` and expects
+    to speak MCP over the child process's stdin/stdout. Pass
+    ``--transport streamable-http`` for the HTTP transport.
+    """
+    if transport not in {"stdio", "streamable-http"}:
+        err_console.print(
+            f"[red]unknown transport {transport!r}[/red] — choose 'stdio' or 'streamable-http'"
+        )
+        raise typer.Exit(2)
     if not skip_precheck:
         warnings = _precheck()
         for w in warnings:
@@ -223,12 +247,24 @@ def serve(
         mem._consolidator.start()
     from .server import build_app
     mcp_app = build_app(mem)
-    err_console.print(
-        f"[bold]thought-mcp {__version__}[/bold] serving on "
-        f"http://{settings.server.host}:{settings.server.port}"
-    )
+    if transport == "streamable-http":
+        # FastMCP stores its own host/port in ``mcp_app.settings``; without
+        # this push-through our ``--host`` / ``--port`` flags are silently
+        # ignored and the server binds 0.0.0.0:8000 regardless.
+        mcp_app.settings.host = settings.server.host
+        mcp_app.settings.port = settings.server.port
+        err_console.print(
+            f"[bold]thought-mcp {__version__}[/bold] serving on "
+            f"http://{settings.server.host}:{settings.server.port}"
+        )
+    else:
+        # stdio: banner goes to stderr so it doesn't corrupt the MCP frames
+        # on stdout. Most MCP clients surface stderr in their logs panel.
+        err_console.print(
+            f"[dim]thought-mcp {__version__} ready (stdio transport)[/dim]"
+        )
     try:
-        mcp_app.run(transport="streamable-http")
+        mcp_app.run(transport=transport)  # type: ignore[arg-type]
     finally:
         mem.close()
 
@@ -409,7 +445,13 @@ def start(
              embedder="auto", write_claude_md=True, quick=False)
     if client:
         install(client=client, all_clients=False, detect=False)
-    serve(config=cfg_path, host=host, port=port, skip_precheck=False)
+    # ``start`` is the human-facing "run a server in a terminal" entrypoint
+    # — pin streamable-http so stdout isn't claimed by MCP frames and the
+    # user can ctrl-C / read logs normally.
+    serve(
+        config=cfg_path, host=host, port=port,
+        transport="streamable-http", skip_precheck=False,
+    )
 
 
 # ---------------------------------------------------------------- ingest

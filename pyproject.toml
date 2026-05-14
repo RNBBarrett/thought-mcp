@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thought-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. A local MCP memory server with bi-temporal graph + vector + temporal layers, a query router, and a consolidation engine."
 readme = "README.md"
 license = "MIT"
@@ -38,11 +38,11 @@ dependencies = [
     # The MCP server can't start without these — they're not really optional
     # for the typical install path (``thought serve``). The ``[mcp]`` extra is
     # kept as an alias for backward compatibility but is now a no-op.
-    "mcp>=1.0",
+    "mcp>=1.9",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=1.9"]
 code = [
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",

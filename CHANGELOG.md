@@ -7,6 +7,65 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.2] — 2026-05-14 — Critical: MCP stdio transport + Windows config + thread-safe SQLite
+
+### Fixed
+- **CRITICAL — MCP server unreachable from any client since v0.1.0.**
+  `thought serve` hardcoded ``transport="streamable-http"``, but every MCP
+  client config wired up by `thought install` / `thought upgrade`
+  invokes the server via stdio (``uvx --from "thought-mcp[mcp,sqlite-vec]==X"
+  thought serve``). The HTTP listener bound port 8000, the client waited
+  for stdio frames, the handshake timed out at 30 s. New default is
+  ``--transport stdio``; pass ``--transport streamable-http`` for the
+  HTTP transport (used by ``thought start`` for foreground dev).
+- **CRITICAL — every MCP tool call would raise** ``ProgrammingError:
+  SQLite objects created in a thread can only be used in that same
+  thread``. The server dispatches tool work via ``asyncio.to_thread``,
+  so the SQLite connection (created on the event-loop thread) was
+  touched from a worker thread without ``check_same_thread=False``.
+  The backend now opens the connection with cross-thread access enabled;
+  SQLite's C-level mutex guarantees serialization.
+- **`thought init` wrote invalid TOML on Windows.** ``db_path =
+  "C:\Users\..."`` contains ``\U``, which is a TOML escape sequence
+  requiring 8 hex digits; the next CLI call crashed with ``TOMLDecodeError:
+  Invalid hex value (at line 1, column 16)``. ``init`` now normalises
+  backslashes to forward slashes in the TOML output (SQLite accepts
+  forward slashes on Windows).
+- **`thought serve --host` / `--port` were silently ignored** for the
+  HTTP transport. FastMCP carries its own ``settings.host`` /
+  ``settings.port`` (default ``0.0.0.0:8000``); the CLI args are now
+  pushed through to those settings.
+
+### Changed
+- **`mcp>=1.9`** in core deps (was ``>=1.0``). FastMCP's
+  ``streamable-http`` transport landed in 1.9.0; earlier versions only
+  supported ``stdio`` and ``sse``. The CLI's transport choices
+  (``stdio`` / ``streamable-http``) require 1.9+.
+- ``thought serve`` banner now goes to stderr in stdio mode so it
+  doesn't corrupt MCP frames on stdout. Most MCP clients surface stderr
+  in their logs panel.
+
+### Added
+- **`tests/integration/`** — first integration tests in the repo:
+  - `test_mcp_stdio_e2e.py` spawns the server as a subprocess and drives
+    it through the official ``mcp`` SDK client. The test that would have
+    caught the v0.2.1 ship bug.
+  - `test_mcp_http_smoke.py` confirms the HTTP transport binds the
+    requested port.
+- **`tests/unit/test_cli.py`** — end-to-end coverage for every CLI
+  subcommand via ``typer.testing.CliRunner`` (28 tests). Zero CLI
+  coverage existed before v0.2.2.
+- **`tests/unit/test_server_tools.py`** — direct ``call_tool`` coverage
+  for the MCP ``remember`` / ``recall`` handlers without going through
+  any transport (7 tests). Catches the same thread-affinity class of
+  bug as the integration tests, faster.
+
+### Internal
+- 150 tests pass (was 101 before v0.2.2). 39 new tests: 28 CLI + 7
+  server-tools + 3 stdio e2e + 1 HTTP smoke.
+
+---
+
 ## [0.2.1] — 2026-05-14 — Upgrade command + uvx-cache fix + critical MCP-startup fix
 
 ### Fixed
@@ -182,6 +241,7 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.2.2]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.2
 [0.2.1]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.1
 [0.2.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.1.0

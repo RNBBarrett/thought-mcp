@@ -483,40 +483,202 @@ thought db load ./snap.db --merge --since 2026-01-01 --time-axis valid
 
 Zero API cost, fully offline. Same provider switch covers embeddings *and* the `--mode extract` path for auto-write, so your durable-fact extraction also runs locally.
 
-**Ollama quickstart:**
+#### Ollama — step by step
+
+**1. Install Ollama** if you don't have it. Download from [ollama.com/download](https://ollama.com/download) (macOS / Linux one-line installer / Windows MSI).
+
+**2. Start the daemon** (it auto-starts on most installs, but in a fresh shell):
+
 ```bash
-ollama serve                                # in another terminal
-ollama pull nomic-embed-text                # 768d local embedding
-thought ollama-setup --write                # auto-writes thought.toml
-thought ingest "Alice owns Acme Corp."
-thought recall "alice"
+ollama serve                                  # blocks; leave it running in its own terminal
+# Test it's up:
+curl http://localhost:11434/api/tags
+# {"models":[]}   ← daemon healthy, no models pulled yet
 ```
 
-**LM Studio quickstart:**
+**3. Pull an embedding model.** Pick *one* of these (matters because the `dim` must match in your config):
+
+| Model | Dim | Size | When to pick |
+|---|---|---|---|
+| `nomic-embed-text` | **768** | 274 MB | **Default — good balance of quality + speed** |
+| `mxbai-embed-large` | 1024 | 670 MB | Higher quality, slower; English-centric |
+| `all-minilm` | 384 | 45 MB | Smallest; matches sentence-transformers' default dim so you can A/B swap |
+| `bge-m3` | 1024 | 1.2 GB | Multilingual; pick if your KB has non-English content |
+
 ```bash
-# In LM Studio's UI: load nomic-embed-text-v1.5 (or any embedding model), start the local server.
+ollama pull nomic-embed-text                  # ~30 s on a fast connection
+```
+
+**4. (Optional) Pull a chat model** if you want auto-write's `--mode extract` path to work locally:
+
+| Chat model | Size | Speed on CPU | Good for `--mode extract`? |
+|---|---|---|---|
+| `mistral:7b` | 4.4 GB | ~5 tok/s | ✅ Reliable, fast enough |
+| `llama3.2:3b` | 2.0 GB | ~10 tok/s | ✅ Smaller, recommended for low-RAM boxes |
+| `qwen2.5:7b` | 4.7 GB | ~5 tok/s | ✅ Stronger reasoning than mistral |
+
+```bash
+ollama pull llama3.2:3b                       # for --mode extract
+```
+
+**5. Wire it into THOUGHT** — one command writes `thought.toml`:
+
+```bash
+thought ollama-setup --write                  # auto-detects the best embedding model
+```
+
+That writes a config like:
+
+```toml
+db_path = ".thought/thought.db"
+
+[embedding]
+choice = "ollama"
+dim = 768
+ollama_host = "http://localhost:11434"
+ollama_model = "nomic-embed-text"
+
+[llm]
+enabled = true
+provider = "ollama"
+model = "llama3.2:3b"
+base_url = "http://localhost:11434"
+```
+
+Edit `model` under `[llm]` if you pulled a different chat model.
+
+**6. Verify the round-trip:**
+
+```bash
+thought init --quick --no-claude-md
+thought ingest "Alice owns Acme Corp."        # uses Ollama for embedding
+thought recall "alice"                        # should return Alice as hit #1
+```
+
+**7. Switch auto-write to extract mode** (optional, recommended once it's working):
+
+In `.claude/settings.json` change the Stop hook command:
+
+```json
+"command": "thought hook write --mode extract"
+```
+
+Each assistant turn is now routed through `llama3.2:3b` (or whichever chat model you set) to distill durable facts before ingest. Zero API cost.
+
+**Troubleshooting:**
+
+- *"Ollama daemon unreachable at http://localhost:11434"* → daemon isn't running. `ollama serve` in another terminal.
+- *"model `X` returned 1024-d embeddings but [embedding] dim = 768"* → you pulled a different model than the config expects. Fix one or the other: either edit `dim = 1024` and `ollama_model = "mxbai-embed-large"` in `thought.toml`, or `ollama pull nomic-embed-text` to match the existing config.
+- *Recall returns nothing even after ingest* → the deterministic / hash embedding might be picking up. Verify your config: `cat thought.toml | grep choice` should show `"ollama"`. If it shows `"auto"` and sentence-transformers is installed, that wins by default — change to explicit `"ollama"`.
+- *Slow recall the first time* → Ollama loads the model into memory on first call (~2-5 s). Subsequent calls are fast. Pre-warm with `curl -d '{"model":"nomic-embed-text","input":"hi"}' http://localhost:11434/api/embed`.
+
+#### LM Studio — step by step
+
+**1. Install LM Studio** if you don't have it. Download from [lmstudio.ai](https://lmstudio.ai/) (macOS / Windows / Linux). Open the app.
+
+**2. Pull an embedding model from inside LM Studio:**
+
+- Click the **Search** icon (left sidebar, looks like a magnifying glass)
+- Search for `nomic-embed-text` (or one of the alternatives below)
+- Click **Download** on the model card
+
+| Model in LM Studio catalog | Dim | When to pick |
+|---|---|---|
+| `nomic-embed-text-v1.5` | **768** | **Default — same as Ollama's choice** |
+| `mxbai-embed-large-v1` | 1024 | Higher quality |
+| `bge-m3` | 1024 | Multilingual |
+
+**3. Start LM Studio's local server:**
+
+- Click the **Developer / Local Server** tab (left sidebar, looks like ⌘)
+- Click the **green Start Server** button at the top
+- Confirm the address shown is `http://localhost:1234/v1` (default)
+- In the "Embedding Model" dropdown, pick the model you downloaded
+- Optionally also load a chat model (for `--mode extract`) in the "Model to Load" dropdown — `mistral-7b-instruct` or `phi-3.5-mini-instruct` are good defaults
+
+**4. Verify the server is up:**
+
+```bash
+curl http://localhost:1234/v1/models
+# Should return JSON listing nomic-embed-text-v1.5 (and any chat model you loaded)
+```
+
+**5. Wire it into THOUGHT:**
+
+```bash
 thought lmstudio-setup --write
-thought ingest "Alice owns Acme Corp."
 ```
 
-**Any OpenAI-compatible server** (vLLM, llama.cpp `--api`, text-generation-webui, OpenAI proper):
+That writes a config like:
+
+```toml
+db_path = ".thought/thought.db"
+
+[embedding]
+choice = "lmstudio"
+dim = 768
+lmstudio_url = "http://localhost:1234/v1"
+lmstudio_model = "nomic-embed-text-v1.5"
+
+[llm]
+enabled = true
+provider = "lmstudio"
+model = "mistral-7b-instruct"     # edit to whatever chat model you loaded
+base_url = "http://localhost:1234/v1"
+```
+
+**6. Verify the round-trip:**
+
+```bash
+thought init --quick --no-claude-md
+thought ingest "Bob runs the warehouse."
+thought recall "bob"
+```
+
+**7. Switch auto-write to extract mode** (optional):
+
+Edit `.claude/settings.json`, change the Stop hook to `"command": "thought hook write --mode extract"`. Each turn now routes through LM Studio's loaded chat model. Zero API cost.
+
+**Troubleshooting:**
+
+- *"LM Studio unreachable at http://localhost:1234/v1"* → the local server isn't running. Open LM Studio, **Developer** tab, click **Start Server**.
+- *"no models loaded"* → you downloaded a model but didn't *load* it. In the Developer tab, pick it from the dropdown.
+- *Dim mismatch error* → you loaded a different model than `lmstudio_model` says in your config. Fix one side or the other.
+- *`thought ask` returns junk Cypher* → the chat model loaded is too small or not instruction-tuned. Try `mistral-7b-instruct` or larger for the extract / ask paths.
+
+#### Any OpenAI-compatible server (vLLM, llama.cpp `--api`, text-generation-webui)
+
+Same shape as LM Studio but pointed at a different URL:
+
 ```toml
 [embedding]
 choice = "openai-compat"
 dim = 1024
 openai_compat_url = "http://localhost:8000/v1"
 openai_compat_model = "your-model-id"
-openai_compat_api_key = ""   # blank for local servers; set for OpenAI cloud
+openai_compat_api_key = ""        # blank for local; set for OpenAI cloud
+
+[llm]
+provider = "openai-compat"
+model = "your-chat-model"
+base_url = "http://localhost:8000/v1"
+api_key = ""
 ```
 
-**Migrate an existing KB to a new embedder:**
+#### Migrating an existing KB to a new embedder
+
+If you've been using `deterministic` or `minilm` and want to upgrade to Ollama / LM Studio without re-ingesting from source:
+
 ```bash
-thought reembed --to ollama --dim 768       # re-embeds every entity; entities + edges untouched
+# Edit thought.toml to point at the new embedder first (or run *-setup --write).
+thought reembed --to ollama --dim 768         # re-embeds every entity in place
 ```
 
-**Performance honesty.** Local embeddings are 5-20 ms per call vs ~0.2 ms for in-process sentence-transformers. For most users that's fine; the `auto` choice still picks sentence-transformers when installed. Pick local LLMs for privacy / no-API-cost, not for raw speed.
+This walks every currently-valid entity, embeds its `name + canonical_name + attrs` through the new embedder, swaps the stored vector. Entities, edges, sources, and saved views are all untouched.
 
-**LLM-extract via a local model.** Once `[llm] provider = "ollama"` (or `lmstudio` / `openai-compat`) is set, the auto-write hook's `--mode extract` path uses it automatically — no Anthropic key required.
+#### Performance honesty
+
+Local embeddings via Ollama / LM Studio are 5-20 ms per call vs ~0.2 ms for in-process sentence-transformers. For most users that's fine; the `auto` choice still picks sentence-transformers when installed. Pick local LLMs for privacy / no-API-cost, not for raw speed.
 
 ### Querying your memory with Cypher (v0.4)
 

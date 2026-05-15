@@ -13,7 +13,35 @@
 
 ---
 
-## ✨ New in v0.3 — Auto-memory + topic browsing
+## ✨ New in v0.4 — Lifecycle commands + Local LLMs + Cypher + Ask
+
+Four headline capabilities:
+
+1. **`thought db`** — `size` / `flush` / `backup <file>` / `load <file>` / `inspect <file>`. With `--before` / `--since` / `--time-axis` to slice the KB by date. Always auto-backs-up before destructive operations.
+2. **Local-LLM integration** — `embedder.choice = "ollama"` / `"lmstudio"` / `"openai-compat"`. `thought ollama-setup` and `thought lmstudio-setup` discover models and write your `thought.toml`. Same provider switch covers auto-write's `--mode extract` so durable-fact extraction runs locally too.
+3. **Cypher query layer** — `thought query "MATCH (p:PERSON)-[:WORKS_AT]->(o) RETURN p.name, o.name"`. Saved views (`thought view save adidas_seattle "..."`) turn queries into named, re-evaluating memory constructs. `thought schema` shows what's queryable. `AS_OF` for time-travel.
+4. **`thought ask` in English** — natural-language → Cypher via your configured LLM (Anthropic / Ollama / LM Studio / OpenAI-compat). Validates against the parser; bad translations degrade to plain `recall` so you always get something. `--save-as <name>` harvests good translations into saved views.
+
+```bash
+# Backup before doing something risky:
+thought db backup ./snap.db && thought db flush --since 2026-01-01 --time-axis valid --yes
+
+# Run with Ollama (no API keys, fully local):
+ollama serve && ollama pull nomic-embed-text
+thought ollama-setup --write
+
+# Ask in English (uses whichever LLM is configured):
+thought ask "who at Acme also prefers Adidas?" --explain --save-as adidas_acme
+
+# Or write Cypher directly:
+thought query "MATCH (p:PERSON)-[:PREFERS]->(:CONCEPT {name:'Adidas'}) RETURN p.name"
+```
+
+See [CHANGELOG.md](CHANGELOG.md#040--2026-05-15--db-lifecycle--local-llms--cypher--ask) for the full v0.4 list. v0.3's auto-memory hooks (below) and v0.2's code-vertical surface are unchanged — v0.4 is purely additive.
+
+---
+
+## ✨ Previously in v0.3 — Auto-memory + topic browsing
 
 **Memory that captures + retrieves itself, plus a way to see what's in there.** Wire two Claude Code hooks into your project, restart, and from that point on every assistant turn is auto-ingested and every user prompt is pre-recalled against the KB — no explicit `remember` / `recall` calls needed. Discoverability: a new `thought topics` command lists what the KB *contains* (people, places, functions, concepts…) and `thought browse <topic>` drills into a specific area.
 
@@ -374,6 +402,165 @@ thought browse Alice --json
 ```
 
 The agent itself can use the same surface via `mcp__thought__list_topics` and `mcp__thought__browse_topic` — useful in prompts like *"first survey what we already know about authentication, then suggest changes"*.
+
+### Managing your KB (v0.4)
+
+THOUGHT now has first-class lifecycle handles for the KB. Three walkthroughs:
+
+**"I just want to start over."**
+```bash
+thought db backup ./before.db        # snapshot before
+thought db flush --yes               # wipe
+# Test some new workflow...
+thought db load ./before.db --yes    # roll back if it went poorly
+```
+
+**"Trim old facts I don't need anymore."**
+```bash
+# See what'd be affected first (peek at a date-bounded snapshot):
+thought db backup ./old.db --before 2026-01-01 --time-axis valid
+thought db inspect ./old.db --schema
+# Confirmed it's what we want; actually flush:
+thought db flush --before 2026-01-01 --time-axis valid --yes
+```
+
+The three time axes:
+- `--time-axis created` (default): when the row was *inserted* (transaction time)
+- `--time-axis valid` *(usually what you want)*: when the fact became true (world time)
+- `--time-axis learned` : when the system *learned* it (alias of created in most setups)
+
+**"Peek inside a backup before loading it."**
+```bash
+thought db inspect ./snap.db --schema
+thought db query ./snap.db "MATCH (p:PERSON) RETURN count(p)"    # coming via the Cypher layer
+thought db load ./snap.db --merge --since 2026-01-01 --time-axis valid
+```
+
+`db load --merge` is non-destructive — INSERT-OR-IGNORE based on the existing entity identity, so re-running is a no-op. Default `db load` (no `--merge`) replaces the active DB, auto-backing up the current one to `<db>.bak.<timestamp>` first.
+
+### Running with local models — Ollama / LM Studio / any OpenAI-compatible server (v0.4)
+
+Zero API cost, fully offline. Same provider switch covers embeddings *and* the `--mode extract` path for auto-write, so your durable-fact extraction also runs locally.
+
+**Ollama quickstart:**
+```bash
+ollama serve                                # in another terminal
+ollama pull nomic-embed-text                # 768d local embedding
+thought ollama-setup --write                # auto-writes thought.toml
+thought ingest "Alice owns Acme Corp."
+thought recall "alice"
+```
+
+**LM Studio quickstart:**
+```bash
+# In LM Studio's UI: load nomic-embed-text-v1.5 (or any embedding model), start the local server.
+thought lmstudio-setup --write
+thought ingest "Alice owns Acme Corp."
+```
+
+**Any OpenAI-compatible server** (vLLM, llama.cpp `--api`, text-generation-webui, OpenAI proper):
+```toml
+[embedding]
+choice = "openai-compat"
+dim = 1024
+openai_compat_url = "http://localhost:8000/v1"
+openai_compat_model = "your-model-id"
+openai_compat_api_key = ""   # blank for local servers; set for OpenAI cloud
+```
+
+**Migrate an existing KB to a new embedder:**
+```bash
+thought reembed --to ollama --dim 768       # re-embeds every entity; entities + edges untouched
+```
+
+**Performance honesty.** Local embeddings are 5-20 ms per call vs ~0.2 ms for in-process sentence-transformers. For most users that's fine; the `auto` choice still picks sentence-transformers when installed. Pick local LLMs for privacy / no-API-cost, not for raw speed.
+
+**LLM-extract via a local model.** Once `[llm] provider = "ollama"` (or `lmstudio` / `openai-compat`) is set, the auto-write hook's `--mode extract` path uses it automatically — no Anthropic key required.
+
+### Querying your memory with Cypher (v0.4)
+
+A documented Cypher subset that compiles to parameterised SQL against our typed-edge graph. Read-only in v0.4 — writes still go through `remember`.
+
+**Discover what's queryable first:**
+```bash
+thought schema
+#  Entity types        Relation types
+#  PERSON          47  WORKS_AT      32
+#  ORGANIZATION    12  PREFERS       18
+#  CONCEPT         89  LIVES_IN      24
+#  function       425  CALLS        575
+```
+
+**Worked examples:**
+```bash
+# Pattern match
+thought query "MATCH (p:PERSON)-[:WORKS_AT]->(o:ORGANIZATION) RETURN p.name, o.name"
+
+# Property + WHERE
+thought query "MATCH (p:PERSON {name:'Alice'}) WHERE p.tier = 'hot' RETURN p"
+
+# Time-travel: what did the KB believe yesterday?
+thought query --as-of 2026-05-14 "MATCH (a:PERSON)-[:PREFERS]->(c) RETURN a.name, c.name"
+
+# See the SQL we emit:
+thought query --explain "MATCH (p:PERSON) RETURN p.name LIMIT 5"
+```
+
+**Save a query as a memory construct:**
+```bash
+thought view save adidas_seattle '
+  MATCH (p:PERSON)-[:PREFERS]->(:CONCEPT {name:"Adidas"})
+  MATCH (p)-[:LIVES_IN]->(:CITY {name:"Seattle"})
+  RETURN p.name'
+thought view run adidas_seattle    # re-evaluates against the live KB every time
+thought view list
+```
+
+This is the *"join disparate facts into a new construct"* primitive — the saved view is pull-evaluated, so any future fact that satisfies it surfaces automatically. Views survive `db flush` (they describe queries, not data).
+
+**Supported v0.4 subset:**
+
+| Cypher feature | Supported? | Notes |
+|---|---|---|
+| `MATCH (n:Type {prop:value})` | ✅ | Entity match by type + property |
+| `(a)-[:REL]->(b)` typed edge | ✅ | Forward + reverse `<-[:REL]-` |
+| `WHERE expr AND expr` | ✅ | `=`, `<>`, `<`, `>`, `<=`, `>=`, `CONTAINS`, `STARTS WITH`, `IN` |
+| `RETURN id, id.prop, id AS alias` | ✅ | Property projection + JSON objects |
+| `LIMIT N`, `SKIP N` | ✅ | |
+| `AS_OF "iso-date"` | ✅ | Bi-temporal time-travel |
+| `OPTIONAL MATCH` | ❌ | Use multiple MATCH clauses |
+| `MERGE` / `CREATE` / `DELETE` / `SET` | ❌ | Writes go through `remember` |
+| Variable-length paths `-[:R*1..N]->` | ❌ | Use explicit multi-step patterns |
+| `WITH` chaining | ❌ | Save intermediate as a view |
+| Aggregations (`count`, `collect`) | ❌ | Coming in v0.5 |
+
+Anything outside the subset raises a clear `UnsupportedCypher` error pointing at this table — no half-working execution.
+
+### Asking in English — `thought ask` (v0.4)
+
+Same query layer, but you type the question and your configured LLM translates it. With Ollama / LM Studio configured, this is zero-API-cost.
+
+```bash
+# Setup: just configure [llm] in thought.toml — any provider works.
+# (Or use thought ollama-setup --write / lmstudio-setup --write.)
+
+thought ask "who at Acme also prefers Adidas?"
+#  fell back to recall: no LLM provider configured
+#  (or: actual Cypher translation if [llm] is set)
+
+thought ask "what shoes do people in Seattle prefer?" --explain
+#  Cypher: MATCH (p:PERSON)-[:LIVES_IN]->(:CITY {name:"Seattle"})
+#          MATCH (p)-[:PREFERS]->(c:CONCEPT) RETURN p.name, c.name
+#  ... result table ...
+
+# Harvest a good translation into a durable saved view:
+thought ask "people who work at Acme" --save-as acme_people --explain
+```
+
+**Honest tradeoffs:**
+- Text-to-Cypher SOTA accuracy is ~72%; local models lag by ~10-20 points. v0.4 *validates* the LLM's output against the parser before executing — bad translations fall back to plain `recall(question)` so you always get something.
+- `--explain` makes the translation auditable. `--save-as` lets you curate the good ones.
+- `--no-fallback` makes scripted workflows fail loudly instead of falling back silently.
 
 ### Working with code — the v0.2 capabilities
 
@@ -751,6 +938,34 @@ thought stats                     # entities / edges / sources / contradictions 
 thought repl                      # interactive shell — type queries, +text to remember
 thought forget 'kendra%'          # soft-delete by SQL LIKE pattern (audit-logged)
 thought consolidate               # run one consolidation cycle
+```
+
+### DB lifecycle + local LLMs + query + ask (v0.4)
+
+```bash
+# Manage the DB:
+thought db size [--json]                           # disk + entity/edge counts
+thought db flush [--yes] [--before X] [--since X] [--time-axis valid|learned|created]
+thought db backup <file> [--force] [--before X] [--since X] [--time-axis ...]
+thought db load <file> [--yes] [--merge] [--before X] [--since X] [--time-axis ...]
+thought db inspect <file> [--schema] [--json]      # peek before loading
+
+# Local LLMs:
+thought ollama-setup [--host URL] [--model M] [--write]
+thought lmstudio-setup [--base-url URL] [--model M] [--write]
+thought reembed --to <ollama|lmstudio|minilm|...>  # migrate embedder w/o re-ingesting
+
+# Query:
+thought schema [--json]                            # entity + relation types
+thought query "<cypher>" [--as-of DATE] [--explain] [--json]
+thought view save <name> "<cypher>" [--replace]
+thought view list [--json]
+thought view show <name>
+thought view run <name> [--json]
+thought view delete <name>
+
+# Ask in English:
+thought ask "<question>" [--explain] [--no-fallback] [--save-as <name>]
 ```
 
 ### Auto-memory + topic browsing (v0.3)

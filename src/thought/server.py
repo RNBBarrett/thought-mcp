@@ -103,6 +103,89 @@ def build_app(memory: Memory):
         return await asyncio.to_thread(_do)
 
     @app.tool()
+    async def schema() -> dict:
+        """Show entity types and relation types currently in the KB.
+
+        Use this before composing Cypher queries via ``query`` or ``ask`` so
+        you know what's available. Returns
+        ``{"entity_types": {type: count}, "relation_types": {type: count}}``.
+        """
+        def _do() -> dict:
+            return memory.schema_summary()
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def query(
+        cypher: str,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+    ) -> dict:
+        """Run a Cypher query against the KB (read-only subset).
+
+        Returns ``{"rows": [{col: value, ...}], "columns": [...]}``.
+        Cypher errors are returned as ``{"error": ..., "kind": "syntax|unsupported|other"}``.
+        """
+        from .query import cypher as _cypher
+
+        def _do() -> dict:
+            try:
+                rows = _cypher.execute(memory, cypher, scope=scope, owner_id=owner_id)
+            except _cypher.UnsupportedCypher as e:
+                return {"error": str(e), "kind": "unsupported"}
+            except _cypher.CypherSyntaxError as e:
+                return {"error": str(e), "kind": "syntax"}
+            except Exception as e:
+                return {"error": str(e), "kind": "other"}
+            return {"rows": rows}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def view_save(name: str, cypher: str) -> dict:
+        """Save a Cypher query as a named view (re-evaluates on each call)."""
+        from .query import views
+
+        def _do() -> dict:
+            try:
+                return views.save_view(memory, name, cypher, replace=True)
+            except Exception as e:
+                return {"error": str(e)}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def view_list() -> dict:
+        """List saved views with their stored Cypher and last-run stats."""
+        from .query import views
+
+        def _do() -> dict:
+            return {"views": views.list_views(memory)}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def view_run(
+        name: str,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+    ) -> dict:
+        """Run a saved view; rows are pull-evaluated against the live KB."""
+        from .query import views
+
+        def _do() -> dict:
+            try:
+                return {"rows": views.run_view(memory, name, scope=scope, owner_id=owner_id)}
+            except Exception as e:
+                return {"error": str(e)}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def view_delete(name: str) -> dict:
+        """Delete a saved view."""
+        from .query import views
+
+        def _do() -> dict:
+            return {"deleted": views.delete_view(memory, name)}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
     async def browse_topic(
         name: str,
         depth: int = 1,

@@ -16,9 +16,9 @@ Embedder: deterministic hashed bag-of-words (same model for all three systems so
 
 | System | p50 | p95 |
 |---|---|---|
-| THOUGHT | 0.00 | 2.01 |
-| OB1 | 0.16 | 0.20 |
-| Karpathy wiki | 0.08 | 0.09 |
+| THOUGHT | 0.00 | 4.21 |
+| OB1 | 0.22 | 0.30 |
+| Karpathy wiki | 0.09 | 0.13 |
 
 ## Structural capabilities
 

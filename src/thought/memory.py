@@ -21,7 +21,7 @@ from .router.dispatcher import Dispatcher
 from .storage.sqlite.backend import SQLiteBackend
 
 
-def _load_embedder(choice: str, *, dim: int) -> Embedder:
+def _load_embedder(choice: str, *, dim: int, embedding_cfg=None) -> Embedder:
     if choice == "auto":
         # Production-grade if available, fall back gracefully.
         # Probe the underlying ``sentence_transformers`` package, not just our
@@ -55,6 +55,38 @@ def _load_embedder(choice: str, *, dim: int) -> Embedder:
                 "sentence-transformers not installed — `pip install thought-mcp[embeddings-local]`"
             ) from e
         return SentenceTransformerEmbedder()
+    # v0.4 local-LLM + remote OpenAI-compatible embedders
+    if choice == "ollama":
+        from .embeddings.ollama import OllamaEmbedder
+        cfg = embedding_cfg
+        host = getattr(cfg, "ollama_host", "http://localhost:11434")
+        model = getattr(cfg, "ollama_model", "nomic-embed-text")
+        return OllamaEmbedder(host=host, model=model, dim=dim)
+    if choice == "lmstudio":
+        from .embeddings.openai_compat import LMStudioEmbedder
+        cfg = embedding_cfg
+        return LMStudioEmbedder(
+            base_url=getattr(cfg, "lmstudio_url", "http://localhost:1234/v1"),
+            model=getattr(cfg, "lmstudio_model", "nomic-embed-text-v1.5"),
+            dim=dim,
+        )
+    if choice == "openai-compat":
+        from .embeddings.openai_compat import OpenAICompatibleEmbedder
+        cfg = embedding_cfg
+        return OpenAICompatibleEmbedder(
+            base_url=getattr(cfg, "openai_compat_url", "http://localhost:8000/v1"),
+            model=getattr(cfg, "openai_compat_model", "text-embedding-3-small"),
+            api_key=(getattr(cfg, "openai_compat_api_key", "") or None),
+            dim=dim,
+        )
+    if choice == "openai":
+        from .embeddings.openai_compat import OpenAIEmbedder
+        cfg = embedding_cfg
+        return OpenAIEmbedder(
+            model=getattr(cfg, "openai_compat_model", "text-embedding-3-small"),
+            api_key=(getattr(cfg, "openai_compat_api_key", "") or None),
+            dim=dim,
+        )
     raise ValueError(f"unknown embedder choice: {choice}")
 
 
@@ -101,12 +133,15 @@ class Memory:
         embedder_choice: str = "deterministic",
         embedder_dim: int = 384,
         consolidation_enabled: bool = False,
+        embedding_cfg=None,
     ) -> Memory:
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         backend = SQLiteBackend(path)
         backend.migrate()
-        embedder = _load_embedder(embedder_choice, dim=embedder_dim)
+        embedder = _load_embedder(
+            embedder_choice, dim=embedder_dim, embedding_cfg=embedding_cfg,
+        )
         return cls(
             backend=backend, embedder=embedder,
             consolidation_enabled=consolidation_enabled,
@@ -212,6 +247,244 @@ class Memory:
             return
         self._backend.touch_access_many(self._touch_queue)
         self._touch_queue.clear()
+
+    # ----------------------------------------------------- db lifecycle (v0.4)
+
+    def db_size(self) -> dict:
+        """Disk usage + entity/edge counts. Powers ``thought db size``."""
+        sizes = self._backend.file_sizes()
+        s = self.stats()
+        return {
+            "path": str(self._backend.path),
+            **sizes,
+            "entities_current": s["entities_current"],
+            "entities_total": s["entities_total"],
+            "edges": s["edges_total"],
+            "sources": s["sources"],
+        }
+
+    def flush(
+        self,
+        *,
+        confirm: bool,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: Literal["created", "valid", "learned"] = "created",
+    ) -> dict[str, int]:
+        """Destructive wipe. ``confirm=True`` is required; SDK guard rail."""
+        if not confirm:
+            raise ValueError(
+                "Memory.flush() requires confirm=True. This is a destructive "
+                "operation that drops or deletes data."
+            )
+        self._flush_touch_queue()
+        # Invalidate the recall cache — flushed data must not surface.
+        self._recall_cache.clear()
+        return self._backend.flush(
+            before=before, since=since, time_axis=time_axis,
+        )
+
+    def backup_to(
+        self,
+        path: str | Path,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: Literal["created", "valid", "learned"] = "created",
+        force: bool = False,
+    ) -> int:
+        """Snapshot the current DB to ``path``. Returns bytes written."""
+        p = Path(path)
+        if p.exists() and not force:
+            raise FileExistsError(
+                f"{p} already exists. Pass force=True (or --force on the CLI) to overwrite."
+            )
+        self._flush_touch_queue()
+        return self._backend.backup_to(
+            p, before=before, since=since, time_axis=time_axis,
+        )
+
+    def load_from(
+        self,
+        path: str | Path,
+        *,
+        merge: bool = False,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: Literal["created", "valid", "learned"] = "created",
+    ) -> dict:
+        """Load a snapshot.
+
+        - ``merge=False`` (default): caller is responsible for swapping the
+          underlying file. This method validates the source + returns a
+          summary; the actual file swap is performed by the CLI which closes
+          this Memory instance, moves files, and re-opens.
+        - ``merge=True``: row-level merge into the live DB via the backend's
+          INSERT-OR-IGNORE path. Idempotent.
+
+        For ``merge=False``, returns ``{"action": "replace", "source": ..., "size": ...}``
+        and the CLI handles file IO. For ``merge=True``, returns
+        ``{"action": "merge", "new_entities": N, "new_edges": M, "new_sources": K}``.
+        """
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"snapshot file not found: {p}")
+        # Quickly validate it's a SQLite DB with a compatible schema.
+        try:
+            tmp = self._backend.__class__.open_readonly(p)
+        except Exception as e:
+            raise ValueError(
+                f"{p} doesn't look like a valid THOUGHT snapshot ({e})"
+            ) from e
+        try:
+            src_ver = tmp.schema_version()
+        finally:
+            tmp.close()
+        cur_ver = self._backend.schema_version()
+        if src_ver > cur_ver:
+            raise ValueError(
+                f"snapshot schema_version={src_ver} is higher than this "
+                f"binary's schema_version={cur_ver}; upgrade thought-mcp first."
+            )
+
+        if merge:
+            self._flush_touch_queue()
+            self._recall_cache.clear()
+            counts = self._backend.merge_from(
+                p, before=before, since=since, time_axis=time_axis,
+            )
+            return {"action": "merge", **counts, "source": str(p)}
+        return {
+            "action": "replace",
+            "source": str(p),
+            "size": p.stat().st_size,
+            "schema_version": src_ver,
+        }
+
+    def schema_summary(self) -> dict[str, dict[str, int]]:
+        """Counts of entity types and edge relation types currently in the KB.
+
+        Powers ``thought schema`` and is injected into auto-recall + auto-context
+        hooks so the agent knows what's queryable. Cheap — two GROUP BY queries.
+        """
+        c = self._backend._conn  # type: ignore[attr-defined]
+        etypes = {
+            r["t"]: r["c"] for r in c.execute(
+                "SELECT type AS t, COUNT(*) AS c FROM entities "
+                "WHERE valid_until IS NULL GROUP BY type ORDER BY c DESC"
+            ).fetchall()
+        }
+        relations = {
+            r["t"]: r["c"] for r in c.execute(
+                "SELECT relation_type AS t, COUNT(*) AS c FROM edges "
+                "WHERE valid_until IS NULL GROUP BY relation_type ORDER BY c DESC"
+            ).fetchall()
+        }
+        return {"entity_types": etypes, "relation_types": relations}
+
+    def reembed_to(
+        self,
+        new_embedder_choice: str,
+        *,
+        new_dim: int | None = None,
+        embedding_cfg=None,
+        batch_size: int = 32,
+        progress: object | None = None,
+    ) -> dict:
+        """Re-embed every entity through a different embedder.
+
+        Lets users start with ``deterministic`` and upgrade to Ollama /
+        sentence-transformers later without re-ingesting from source.
+        Re-embeds the entity's ``name`` (the same signal the ingest pipeline
+        uses for canonical-name lookups). Returns ``{"reembedded": N, "dim": D, "model": ...}``.
+
+        ``progress`` is an optional callable ``progress(advance: int)`` for
+        CLI integration with ``rich.Progress``.
+        """
+        new_embedder = _load_embedder(
+            new_embedder_choice,
+            dim=new_dim if new_dim is not None else self._embedder.dim,
+            embedding_cfg=embedding_cfg,
+        )
+        # All currently-valid entities; iterate by name (the ingest signal).
+        rows = self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT id, name FROM entities WHERE valid_until IS NULL"
+        ).fetchall()
+        from .embeddings.base import vector_to_bytes
+        n = 0
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            texts = [r["name"] for r in batch]
+            vectors = new_embedder.embed_many(texts)
+            for r, v in zip(batch, vectors, strict=True):
+                self._backend.store_embedding(
+                    entity_id=r["id"],
+                    model_name=new_embedder.model_name,
+                    model_version=new_embedder.model_version,
+                    dim=new_embedder.dim,
+                    vector=vector_to_bytes(v),
+                )
+                n += 1
+            if progress is not None:
+                progress(len(batch))  # type: ignore[misc]
+        # Recall cache embeds model identity implicitly via write_version,
+        # but be defensive: blow it away so nothing surfaces from a stale embed.
+        self._recall_cache.clear()
+        return {
+            "reembedded": n,
+            "model": new_embedder.model_name,
+            "dim": new_embedder.dim,
+        }
+
+    def inspect_file(
+        self,
+        path: str | Path,
+        *,
+        include_schema: bool = False,
+    ) -> dict:
+        """Stats (+ optional schema) of a backup file without loading it."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"snapshot file not found: {p}")
+        backend = self._backend.__class__.open_readonly(p)
+        try:
+            rows = backend._conn.execute(  # type: ignore[attr-defined]
+                "SELECT "
+                "(SELECT COUNT(*) FROM entities) AS n_entities, "
+                "(SELECT COUNT(*) FROM entities WHERE valid_until IS NULL) AS n_current, "
+                "(SELECT COUNT(*) FROM edges) AS n_edges, "
+                "(SELECT COUNT(*) FROM edges WHERE relation_type='CONTRADICTS') AS n_contradictions, "
+                "(SELECT COUNT(*) FROM sources) AS n_sources"
+            ).fetchone()
+            summary = {
+                "path": str(p),
+                "size_bytes": p.stat().st_size,
+                "schema_version": backend.schema_version(),
+                "entities_total": rows["n_entities"],
+                "entities_current": rows["n_current"],
+                "edges": rows["n_edges"],
+                "contradictions": rows["n_contradictions"],
+                "sources": rows["n_sources"],
+            }
+            if include_schema:
+                # Mini schema-summary: counts by entity type + edge relation.
+                etypes = {
+                    r["t"]: r["c"] for r in backend._conn.execute(  # type: ignore[attr-defined]
+                        "SELECT type AS t, COUNT(*) AS c FROM entities "
+                        "WHERE valid_until IS NULL GROUP BY type ORDER BY c DESC"
+                    ).fetchall()
+                }
+                relations = {
+                    r["t"]: r["c"] for r in backend._conn.execute(  # type: ignore[attr-defined]
+                        "SELECT relation_type AS t, COUNT(*) AS c FROM edges "
+                        "GROUP BY relation_type ORDER BY c DESC"
+                    ).fetchall()
+                }
+                summary["entity_types"] = etypes
+                summary["relation_types"] = relations
+            return summary
+        finally:
+            backend.close()
 
     # ----------------------------------------------------- topic browsing
 

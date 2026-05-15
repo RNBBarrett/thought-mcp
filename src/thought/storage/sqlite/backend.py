@@ -158,7 +158,292 @@ class SQLiteBackend(StorageBackend):
             )
 
     def close(self) -> None:
+        # WAL-checkpoint with TRUNCATE so the .db-wal file doesn't grow
+        # unboundedly between sessions and so any backup taken after close
+        # sees a fully consistent .db file. The PASSIVE form is sufficient
+        # for correctness; TRUNCATE additionally shrinks the wal file.
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.DatabaseError:  # pragma: no cover — closed DB / corruption
+            pass
         self._conn.close()
+
+    def checkpoint_wal(self) -> None:
+        """Force a TRUNCATE checkpoint immediately. Used by ``backup_to``
+        so backups always see a consistent file."""
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    _USER_TABLES: tuple[str, ...] = (
+        "embeddings", "strength_cache", "triples", "edges",
+        "entities", "sources", "consolidation_log",
+    )
+
+    def flush(
+        self,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> dict[str, int]:
+        """Wipe data from the KB. *Destructive.*
+
+        - No date bounds → full flush: DROP tables, re-run migrations.
+        - With ``before`` / ``since`` → row-level delete on entities whose
+          chosen timestamp column falls outside the kept range. Cascades to
+          edges / triples / embeddings / strength_cache. Orphaned sources
+          (those no longer referenced by any edge) are then deleted.
+
+        ``time_axis`` selects the entity timestamp column:
+        - ``"created"`` (default): transaction time at insert (``created_at``)
+        - ``"valid"``:   world time the fact became true (``valid_from``)
+        - ``"learned"``: transaction time the system learned it (``learned_at``)
+
+        Returns row-count summary keyed by table.
+        """
+        if time_axis not in {"created", "valid", "learned"}:
+            raise ValueError(
+                f"time_axis must be 'created' / 'valid' / 'learned'; got {time_axis!r}"
+            )
+        col = {
+            "created": "created_at",
+            "valid":   "valid_from",
+            "learned": "learned_at",
+        }[time_axis]
+
+        # ---- full flush
+        if before is None and since is None:
+            counts = {
+                t: int(self._conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"])
+                for t in self._USER_TABLES
+                if self._table_exists(t)
+            }
+            # Drop in reverse dependency order so FK cascades don't surprise us;
+            # the migration replays will recreate everything.
+            for t in self._USER_TABLES:
+                self._conn.execute(f"DROP TABLE IF EXISTS {t}")
+            # Drop the applied_migrations table so migrate() re-runs everything.
+            self._conn.execute("DROP TABLE IF EXISTS applied_migrations")
+            self._conn.execute("DROP TABLE IF EXISTS schema_version")
+            self.migrate()
+            self._touch_write()
+            return counts
+
+        # ---- date-bounded flush
+        clauses, params = [], []
+        if before is not None:
+            clauses.append(f"{col} < ?")
+            params.append(_utc_iso(before))
+        if since is not None:
+            clauses.append(f"{col} >= ?")
+            params.append(_utc_iso(since))
+        where = " AND ".join(clauses)
+        # Count first so we can report what got removed.
+        n_entities = int(self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM entities WHERE {where}", params,
+        ).fetchone()["n"])
+        n_edges = int(self._conn.execute(
+            f"SELECT COUNT(*) AS n FROM edges "
+            f"WHERE source_id IN (SELECT id FROM entities WHERE {where}) "
+            f"   OR target_id IN (SELECT id FROM entities WHERE {where})",
+            params + params,
+        ).fetchone()["n"])
+        # Delete entities; cascades take care of edges/triples/embeddings/strength_cache.
+        self._conn.execute(f"DELETE FROM entities WHERE {where}", params)
+        # Clean up orphaned sources (no surviving edge references).
+        n_sources = int(self._conn.execute(
+            "DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_ref FROM edges)"
+        ).rowcount or 0)
+        self._touch_write()
+        return {
+            "entities": n_entities,
+            "edges": n_edges,
+            "sources": n_sources,
+        }
+
+    def _table_exists(self, name: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+
+    def file_sizes(self) -> dict[str, int]:
+        """On-disk sizes of the main db + WAL + SHM sidecars, in bytes.
+
+        Powers ``thought db size``. Returns 0 for any sidecar that doesn't
+        exist (in-memory dbs, fresh files before any WAL traffic, etc.).
+        """
+        main = Path(self.path)
+        wal = Path(self.path + "-wal")
+        shm = Path(self.path + "-shm")
+        sizes = {
+            "main": main.stat().st_size if main.exists() else 0,
+            "wal":  wal.stat().st_size if wal.exists() else 0,
+            "shm":  shm.stat().st_size if shm.exists() else 0,
+        }
+        sizes["total_bytes"] = sizes["main"] + sizes["wal"] + sizes["shm"]
+        return sizes
+
+    # ---- v0.4 backup / load primitives -------------------------------------
+
+    def backup_to(
+        self,
+        target_path: str | Path,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> int:
+        """Snapshot the current DB to ``target_path``.
+
+        - Full backup (no date bounds): straight ``Connection.backup()``.
+        - Date-bounded backup: backup the full file first, then open the
+          target file in a fresh connection and DELETE rows outside the
+          kept range, finally VACUUM to reclaim space.
+
+        Returns the size of the resulting file in bytes.
+        """
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # If target exists with non-SQLite content (or stale content from a
+        # previous backup), unlink first — sqlite3.Connection.backup() needs
+        # to write to a fresh / valid SQLite file.
+        if target.exists():
+            target.unlink()
+        # Also clear any sidecar files left over from a previous WAL-mode db.
+        for ext in ("-wal", "-shm"):
+            sidecar = Path(str(target) + ext)
+            if sidecar.exists():
+                sidecar.unlink()
+        # Force a WAL checkpoint so the .db file sees all committed writes
+        # before sqlite3.Connection.backup() reads from it.
+        self.checkpoint_wal()
+        # Online-backup API: copies pages from a live, possibly-writing source.
+        # isolation_level=None → autocommit; required so VACUUM (below) doesn't
+        # error with "cannot VACUUM from within a transaction".
+        dest = sqlite3.connect(str(target), isolation_level=None)
+        try:
+            self._conn.backup(dest)
+            if before is None and since is None:
+                return target.stat().st_size
+            # Date-bounded: DELETE out-of-range rows in the snapshot.
+            col = {
+                "created": "created_at",
+                "valid":   "valid_from",
+                "learned": "learned_at",
+            }[time_axis]
+            clauses, params = [], []
+            # We DELETE entities OUTSIDE the keep range, so the predicate is the inverse.
+            if before is not None:
+                clauses.append(f"{col} >= ?")
+                params.append(_utc_iso(before))
+            if since is not None:
+                clauses.append(f"{col} < ?")
+                params.append(_utc_iso(since))
+            where = " OR ".join(clauses)
+            dest.execute("PRAGMA foreign_keys = ON")
+            dest.execute(f"DELETE FROM entities WHERE {where}", params)
+            dest.execute(
+                "DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_ref FROM edges)"
+            )
+            dest.execute("VACUUM")
+        finally:
+            dest.close()
+        return target.stat().st_size
+
+    def merge_from(
+        self,
+        source_path: str | Path,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> dict[str, int]:
+        """Merge entities + edges + sources from another SQLite file.
+
+        Uses ``INSERT OR IGNORE`` so existing rows are preserved — the live
+        DB always wins on PK conflicts. Returns counts of *newly inserted*
+        rows per table.
+
+        Date filters select which rows are eligible for merge from the
+        source file.
+        """
+        src = Path(source_path)
+        if not src.exists():
+            raise FileNotFoundError(f"merge source not found: {src}")
+        col = {
+            "created": "created_at",
+            "valid":   "valid_from",
+            "learned": "learned_at",
+        }[time_axis]
+        clauses, params = [], []
+        if before is not None:
+            clauses.append(f"{col} < ?")
+            params.append(_utc_iso(before))
+        if since is not None:
+            clauses.append(f"{col} >= ?")
+            params.append(_utc_iso(since))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        before_counts = {
+            t: int(self._conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"])
+            for t in ("entities", "edges", "sources")
+        }
+        self._conn.execute(f"ATTACH DATABASE '{src}' AS src")
+        try:
+            # Order matters: sources before edges (FK), entities before edges (FK).
+            self._conn.execute(
+                "INSERT OR IGNORE INTO sources "
+                "SELECT * FROM src.sources "
+                "WHERE id IN (SELECT DISTINCT source_ref FROM src.edges "
+                f"            WHERE source_id IN (SELECT id FROM src.entities{where}))",
+                params,
+            )
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO entities SELECT * FROM src.entities{where}",
+                params,
+            )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO edges SELECT * FROM src.edges "
+                "WHERE source_id IN (SELECT id FROM entities) "
+                "  AND target_id IN (SELECT id FROM entities)"
+            )
+        finally:
+            self._conn.execute("DETACH DATABASE src")
+        after_counts = {
+            t: int(self._conn.execute(f"SELECT COUNT(*) AS n FROM {t}").fetchone()["n"])
+            for t in ("entities", "edges", "sources")
+        }
+        self._touch_write()
+        return {
+            f"new_{t}": after_counts[t] - before_counts[t]
+            for t in ("entities", "edges", "sources")
+        }
+
+    @classmethod
+    def open_readonly(cls, path: str | Path) -> SQLiteBackend:
+        """Open an existing SQLite file in read-only mode.
+
+        Used by ``thought db query <file>`` / ``thought db inspect <file>``
+        so we can run schema / read queries against a backup file without
+        risking writes to it. Skips ``migrate()`` — the file is assumed
+        to already match the expected schema.
+        """
+        inst = cls.__new__(cls)
+        inst.path = str(path)
+        # ``mode=ro`` uses SQLite's read-only URI flag — any write attempt
+        # raises ``OperationalError: attempt to write a readonly database``.
+        uri = f"file:{path}?mode=ro"
+        inst._conn = sqlite3.connect(
+            uri, isolation_level=None, check_same_thread=False, uri=True,
+        )
+        inst._conn.row_factory = sqlite3.Row
+        inst._conn.execute("PRAGMA foreign_keys = ON")
+        inst._conn.execute("PRAGMA busy_timeout = 5000")
+        inst._vec_available = False  # Don't attempt vec0 on a read-only file.
+        inst._vec_tables = set()
+        inst._write_version = 0
+        return inst
 
     def write_version(self) -> int:
         """Monotonic token. Increments on every mutating call.

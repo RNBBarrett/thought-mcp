@@ -13,13 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-HookKind = Literal["recall", "write"]
-ALL_KINDS: tuple[HookKind, ...] = ("recall", "write")
+HookKind = Literal["recall", "write", "context"]
+ALL_KINDS: tuple[HookKind, ...] = ("recall", "write", "context")
 
 # Mapping from hook kind → Claude Code event name + the command to register.
 _HOOK_SPEC: dict[HookKind, tuple[str, str]] = {
-    "recall": ("UserPromptSubmit", "thought hook recall"),
-    "write":  ("Stop",              "thought hook write"),
+    "recall":  ("UserPromptSubmit", "thought hook recall"),
+    "write":   ("Stop",             "thought hook write"),
+    "context": ("SessionStart",     "thought hook context"),
 }
 
 

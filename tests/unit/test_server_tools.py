@@ -47,9 +47,10 @@ def _payload(call_result) -> dict:
 def test_tools_register_with_expected_names(app_and_mem) -> None:
     app, _ = app_and_mem
     tm = app._tool_manager  # internal but stable across mcp 1.x
-    # v0.3 adds list_topics + browse_topic alongside the v0.1 remember + recall.
+    # v0.4 adds schema + query + view_{save,list,run,delete} alongside v0.3's set.
     assert set(tm._tools.keys()) == {
         "remember", "recall", "list_topics", "browse_topic",
+        "schema", "query", "view_save", "view_list", "view_run", "view_delete",
     }
 
 

@@ -54,6 +54,16 @@ hook_app = typer.Typer(
     help="Claude Code hook integrations for auto-write + auto-recall.",
 )
 app.add_typer(hook_app, name="hook")
+db_app = typer.Typer(
+    name="db",
+    help="Database lifecycle: size, flush, backup, load, inspect, query.",
+)
+app.add_typer(db_app, name="db")
+view_app = typer.Typer(
+    name="view",
+    help="Saved Cypher views — named queries that derive new constructs.",
+)
+app.add_typer(view_app, name="view")
 console = Console(stderr=False)
 err_console = Console(stderr=True)
 
@@ -64,6 +74,7 @@ def _open_memory(settings: Settings) -> Memory:
         embedder_choice=settings.embedding.choice,
         embedder_dim=settings.embedding.dim,
         consolidation_enabled=False,
+        embedding_cfg=settings.embedding,
     )
 
 
@@ -912,6 +923,460 @@ def ingest_git_cmd(
 
 
 @app.command()
+def schema(
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show entity types + relation types currently in the KB.
+
+    Use this before composing Cypher queries to see what's queryable.
+    """
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        data = mem.schema_summary()
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data=data)
+        return
+    et = data.get("entity_types") or {}
+    rt = data.get("relation_types") or {}
+    if not et and not rt:
+        console.print("[dim]KB is empty — ingest some facts and try again.[/dim]")
+        return
+    if et:
+        t = Table(title="Entity types", show_header=False, border_style="cyan")
+        t.add_column(style="bold")
+        t.add_column(justify="right")
+        for k, v in et.items():
+            t.add_row(k, str(v))
+        console.print(t)
+    if rt:
+        t = Table(title="Relation types", show_header=False, border_style="cyan")
+        t.add_column(style="bold")
+        t.add_column(justify="right")
+        for k, v in rt.items():
+            t.add_row(k, str(v))
+        console.print(t)
+
+
+@app.command()
+def query(
+    cypher_source: str = typer.Argument(..., help="Cypher query string."),
+    as_of: str | None = typer.Option(None, "--as-of", help="ISO date for time-travel query."),
+    scope: str = typer.Option("all"),
+    owner_id: str | None = typer.Option(None),
+    explain: bool = typer.Option(False, "--explain", help="Print the emitted SQL before running."),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Run a Cypher query against the KB.
+
+    Supported subset: MATCH (var:Type {prop:val}) [-[:REL]-> (var:Type)] ...
+    WHERE expr AND expr ... RETURN identlist [AS_OF 'date'] [LIMIT N].
+
+    See ``thought schema`` first to see what entity types and relation types
+    are available.
+    """
+    from .query import cypher as cypher_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        # Allow --as-of as a flag in addition to inline AS_OF in the cypher.
+        if as_of and "AS_OF" not in cypher_source.upper():
+            cypher_source = f'{cypher_source} AS_OF "{as_of}"'
+        try:
+            q = cypher_mod.parse(cypher_source)
+            from .models import ScopeFilter
+            sql, params, columns = cypher_mod.compile_to_sql(
+                q, scope_filter=ScopeFilter(scope=scope, owner_id=owner_id),  # type: ignore[arg-type]
+            )
+        except cypher_mod.CypherError as e:
+            err_console.print(f"[red]Cypher error:[/red] {e}")
+            raise typer.Exit(2) from e
+        if explain:
+            console.print(f"[dim]SQL:[/dim] {sql}")
+            console.print(f"[dim]params:[/dim] {params}")
+        rows = mem._backend._conn.execute(sql, params).fetchall()
+    finally:
+        mem.close()
+
+    if json_out:
+        import json as _json
+        out_rows = []
+        for r in rows:
+            d: dict[str, object] = {}
+            for i, c in enumerate(columns):
+                v = r[i]
+                if isinstance(v, str) and v.startswith("{") and v.endswith("}"):
+                    try:
+                        d[c] = _json.loads(v)
+                        continue
+                    except _json.JSONDecodeError:
+                        pass
+                d[c] = v
+            out_rows.append(d)
+        console.print_json(data={"rows": out_rows})
+        return
+    if not rows:
+        console.print("[dim]no rows[/dim]")
+        return
+    t = Table(title="query", border_style="cyan")
+    for c in columns:
+        t.add_column(c)
+    for r in rows:
+        t.add_row(*[str(v) if v is not None else "" for v in r])
+    console.print(t)
+
+
+@view_app.command("save")
+def view_save_cmd(
+    name: str = typer.Argument(..., help="Saved view name (identifier-shape)."),
+    cypher_source: str = typer.Argument(..., help="Cypher query to save."),
+    replace: bool = typer.Option(False, "--replace", help="Overwrite if it exists."),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Save a Cypher query as a named view.
+
+    Views re-evaluate against the live KB every time you call ``view run``.
+    """
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        try:
+            views_mod.save_view(mem, name, cypher_source, replace=replace)
+        except (views_mod.ViewError, ValueError) as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(2) from e
+    finally:
+        mem.close()
+    console.print(f"  [green][ok][/green] saved view [bold]{name}[/bold]")
+
+
+@view_app.command("list")
+def view_list_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """List all saved views."""
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        data = views_mod.list_views(mem)
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"views": data})
+        return
+    if not data:
+        console.print("[dim]no saved views yet.[/dim]")
+        return
+    t = Table(title="Saved views", border_style="cyan")
+    t.add_column("name", style="bold")
+    t.add_column("cypher")
+    t.add_column("last run")
+    for v in data:
+        t.add_row(
+            str(v["name"]),
+            str(v["cypher"])[:60] + ("…" if len(str(v["cypher"])) > 60 else ""),
+            str(v.get("last_run_at") or "—"),
+        )
+    console.print(t)
+
+
+@view_app.command("show")
+def view_show_cmd(
+    name: str = typer.Argument(...),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Print a saved view's definition."""
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        data = views_mod.show_view(mem, name)
+    finally:
+        mem.close()
+    if not data:
+        err_console.print(f"[red]no saved view[/red] {name!r}")
+        raise typer.Exit(1)
+    console.print_json(data=data)
+
+
+@view_app.command("run")
+def view_run_cmd(
+    name: str = typer.Argument(...),
+    scope: str = typer.Option("all"),
+    owner_id: str | None = typer.Option(None),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Run a saved view; results are pull-evaluated against the live KB."""
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        try:
+            rows = views_mod.run_view(mem, name, scope=scope, owner_id=owner_id)
+        except views_mod.ViewError as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"rows": rows})
+        return
+    if not rows:
+        console.print("[dim]no rows[/dim]")
+        return
+    cols = list(rows[0].keys())
+    t = Table(title=f"view: {name}", border_style="cyan")
+    for c in cols:
+        t.add_column(c)
+    for r in rows:
+        t.add_row(*[str(r.get(c, "")) for c in cols])
+    console.print(t)
+
+
+@view_app.command("delete")
+def view_delete_cmd(
+    name: str = typer.Argument(...),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        deleted = views_mod.delete_view(mem, name)
+    finally:
+        mem.close()
+    if deleted:
+        console.print(f"  [green][ok][/green] deleted [bold]{name}[/bold]")
+    else:
+        err_console.print(f"[yellow]no saved view named[/yellow] {name!r}")
+        raise typer.Exit(1)
+
+
+@app.command("ask")
+def ask_cmd(
+    question: str = typer.Argument(..., help="Natural-language question."),
+    scope: str = typer.Option("all"),
+    owner_id: str | None = typer.Option(None),
+    explain: bool = typer.Option(False, "--explain", help="Print emitted Cypher + SQL before results."),
+    no_fallback: bool = typer.Option(False, "--no-fallback", help="Fail loudly instead of falling back to recall."),
+    save_as: str | None = typer.Option(None, "--save-as", help="Save successful translation as a named view."),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Ask in English; THOUGHT translates to Cypher via your configured LLM.
+
+    The provider is picked from [llm] provider in your thought.toml:
+    anthropic / ollama / lmstudio / openai-compat / openai. For Ollama /
+    LM Studio users this is zero-API-cost — the LLM is already on your box.
+
+    Bad translations degrade gracefully to a plain `recall(question)` so
+    you always get something. Pass --no-fallback to fail instead.
+    """
+    from .query import ask as ask_mod
+    from .query import views as views_mod
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        result = ask_mod.ask(
+            mem, question,
+            llm_cfg=settings.llm,
+            scope=scope, owner_id=owner_id,
+            no_fallback=no_fallback,
+        )
+        if save_as and result.cypher and not result.fallback_used:
+            try:
+                views_mod.save_view(mem, save_as, result.cypher, replace=True)
+            except views_mod.ViewError as e:
+                err_console.print(f"[red]could not save view: {e}[/red]")
+    finally:
+        mem.close()
+
+    if result.error:
+        err_console.print(f"[red]{result.error}[/red]")
+        raise typer.Exit(1)
+    if explain and result.cypher:
+        console.print(f"[dim]Cypher:[/dim] {result.cypher}")
+    if explain and result.sql:
+        console.print(f"[dim]SQL:[/dim] {result.sql}")
+    if result.fallback_used:
+        console.print(f"[yellow]fell back to recall:[/yellow] {result.fallback_reason}")
+    if not result.rows:
+        console.print("[dim]no rows[/dim]")
+        return
+    cols = list(result.rows[0].keys())
+    t = Table(title=f"ask: {question}", border_style="cyan")
+    for c in cols:
+        t.add_column(c)
+    for r in result.rows:
+        t.add_row(*[str(r.get(c, "")) for c in cols])
+    console.print(t)
+    if save_as and result.cypher and not result.fallback_used:
+        console.print(f"[dim]saved as view '{save_as}'[/dim]")
+
+
+@app.command("ollama-setup")
+def ollama_setup_cmd(
+    host: str = typer.Option(
+        "http://localhost:11434", "--host",
+        help="Ollama daemon URL.",
+    ),
+    model: str | None = typer.Option(
+        None, "--model", help="Embedding model to suggest (default: pick from installed).",
+    ),
+    write_config: bool = typer.Option(
+        False, "--write", help="Rewrite thought.toml to point at Ollama.",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Check Ollama, list installed models, print a thought.toml snippet.
+
+    Doesn't pull models for you — printing the ``ollama pull`` command is
+    the user's signal to download something.
+    """
+    from .hooks.setup import KNOWN_OLLAMA_EMBED_MODELS, TOML_OLLAMA_SNIPPET, ping_ollama
+    result = ping_ollama(host)
+    if not result.reachable:
+        err_console.print(f"[red]{result.error}[/red]")
+        raise typer.Exit(1)
+    if not result.models:
+        console.print(
+            f"[yellow]Ollama is running at {host}, but no models are installed.[/yellow]\n"
+            f"  Try: [bold]ollama pull nomic-embed-text[/bold]"
+        )
+        raise typer.Exit(1)
+    table = Table(title=f"Models installed at {host}", border_style="cyan")
+    table.add_column("model", style="bold")
+    table.add_column("embedding-capable?")
+    for m in result.models:
+        is_embed = any(km in m for km in KNOWN_OLLAMA_EMBED_MODELS)
+        table.add_row(m, "[green]yes[/green]" if is_embed else "[dim]no[/dim]")
+    console.print(table)
+    chosen_model = model or result.suggested_model
+    if not chosen_model:
+        console.print(
+            "[yellow]No embedding-capable model installed.[/yellow]\n"
+            "  Try: [bold]ollama pull nomic-embed-text[/bold]"
+        )
+        raise typer.Exit(1)
+    snippet = TOML_OLLAMA_SNIPPET.format(host=host, model=chosen_model)
+    if write_config:
+        cfg = _resolve_config(config)
+        cfg.write_text(f'db_path = ".thought/thought.db"\n\n{snippet}', encoding="utf-8")
+        console.print(f"  [green][ok][/green] wrote {cfg}")
+    else:
+        console.print("[dim]Add this to your thought.toml:[/dim]")
+        console.print(snippet)
+
+
+@app.command("lmstudio-setup")
+def lmstudio_setup_cmd(
+    base_url: str = typer.Option(
+        "http://localhost:1234/v1", "--base-url",
+        help="LM Studio server URL.",
+    ),
+    model: str | None = typer.Option(
+        None, "--model", help="Embedding model to suggest (default: first loaded model).",
+    ),
+    write_config: bool = typer.Option(
+        False, "--write", help="Rewrite thought.toml to point at LM Studio.",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Check LM Studio, list loaded models, print a thought.toml snippet."""
+    from .hooks.setup import TOML_LMSTUDIO_SNIPPET, ping_lmstudio
+    result = ping_lmstudio(base_url)
+    if not result.reachable:
+        err_console.print(f"[red]{result.error}[/red]")
+        raise typer.Exit(1)
+    if not result.models:
+        console.print(
+            f"[yellow]LM Studio is reachable at {base_url}, but no models are loaded.[/yellow]\n"
+            f"  Load an embedding model in the LM Studio UI first."
+        )
+        raise typer.Exit(1)
+    table = Table(title=f"Models loaded at {base_url}", border_style="cyan")
+    table.add_column("model id", style="bold")
+    for m in result.models:
+        table.add_row(m)
+    console.print(table)
+    chosen_model = model or result.models[0]
+    snippet = TOML_LMSTUDIO_SNIPPET.format(base_url=base_url, model=chosen_model)
+    if write_config:
+        cfg = _resolve_config(config)
+        cfg.write_text(f'db_path = ".thought/thought.db"\n\n{snippet}', encoding="utf-8")
+        console.print(f"  [green][ok][/green] wrote {cfg}")
+    else:
+        console.print("[dim]Add this to your thought.toml:[/dim]")
+        console.print(snippet)
+
+
+@app.command()
+def reembed(
+    to: str = typer.Option(
+        ..., "--to",
+        help="Target embedder choice: deterministic | minilm | ollama | lmstudio | openai-compat | openai.",
+    ),
+    dim: int | None = typer.Option(
+        None, "--dim", help="Override target dim (default: keep current).",
+    ),
+    batch_size: int = typer.Option(32, "--batch-size"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Re-embed every entity through a different embedder.
+
+    Lets you start with ``deterministic`` for cheap setup and upgrade to a
+    production embedder (Ollama, MiniLM, etc.) later without re-ingesting
+    from source. Doesn't touch entity rows / edges / sources — only the
+    ``embeddings`` table.
+
+    Examples:
+        thought reembed --to ollama
+        thought reembed --to minilm --dim 384
+    """
+    settings = load_settings(_resolve_config(config))
+    # Build an override embedding config so the new embedder picks up the
+    # user's [embedding] Ollama / LM Studio / OpenAI-compat fields.
+    mem = _open_memory(settings)
+    try:
+        # Count first for the progress bar.
+        n_rows = int(mem._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM entities WHERE valid_until IS NULL"
+        ).fetchone()["n"])
+        with Progress(
+            SpinnerColumn(), TextColumn("[bold]{task.description}"),
+            BarColumn(), MofNCompleteColumn(),
+            console=err_console, transient=True,
+        ) as prog:
+            task = prog.add_task(f"reembedding via {to}", total=n_rows)
+            result = mem.reembed_to(
+                to,
+                new_dim=dim,
+                embedding_cfg=settings.embedding,
+                batch_size=batch_size,
+                progress=lambda n: prog.advance(task, n),
+            )
+    finally:
+        mem.close()
+    table = Table(title="Reembed summary", show_header=False, border_style="cyan")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    for k, v in result.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print(
+        "[dim]Tip: update [embedding] choice in thought.toml to make the new "
+        "embedder the default on next open.[/dim]"
+    )
+
+
+@app.command()
 def topics(
     scope: str = typer.Option("all", help="'shared', 'private', or 'all'."),
     owner_id: str | None = typer.Option(None),
@@ -1251,8 +1716,370 @@ def hook_write_cmd(
         scope=scope, owner_id=owner_id,
         embedder_choice=settings.embedding.choice,
         embedder_dim=settings.embedding.dim,
+        embedding_cfg=settings.embedding,
+        llm_cfg=settings.llm,
     )
     raise typer.Exit(rc)
+
+
+@db_app.command("size")
+def db_size_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show on-disk size of the DB file + WAL/SHM sidecars + entity counts."""
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        data = mem.db_size()
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data=data)
+        return
+    table = Table(title="Database on-disk size", show_header=False, border_style="cyan")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_row("path", str(data["path"]))
+    table.add_row("main (db)", _human_bytes(int(data["main"])))
+    table.add_row("wal", _human_bytes(int(data["wal"])))
+    table.add_row("shm", _human_bytes(int(data["shm"])))
+    table.add_row("total", f"[bold]{_human_bytes(int(data['total_bytes']))}[/bold]")
+    table.add_row("entities (current/total)",
+                  f"{data['entities_current']} / {data['entities_total']}")
+    table.add_row("edges", str(data["edges"]))
+    table.add_row("sources", str(data["sources"]))
+    console.print(table)
+
+
+def _human_bytes(n: int) -> str:
+    """Render a byte count like Linux's du -h."""
+    if n < 1024:
+        return f"{n} B"
+    for unit in ("KB", "MB", "GB", "TB"):
+        n_f = n / 1024
+        if n_f < 1024 or unit == "TB":
+            return f"{n_f:.1f} {unit}"
+        n = int(n_f)
+    return f"{n} B"  # unreachable
+
+
+def _parse_date(s: str | None) -> datetime | None:
+    """Accept ISO date or datetime; UTC if no tz given."""
+    if s is None:
+        return None
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        from datetime import UTC as _UTC
+        dt = dt.replace(tzinfo=_UTC)
+    return dt
+
+
+@db_app.command("flush")
+def db_flush_cmd(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+    before: str | None = typer.Option(
+        None, "--before", help="Only delete entities created/valid/learned BEFORE this date (ISO).",
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Only delete entities created/valid/learned AT OR AFTER this date (ISO).",
+    ),
+    time_axis: str = typer.Option(
+        "created", "--time-axis",
+        help="Which timestamp to filter on: created | valid | learned.",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Wipe the KB. Destructive.
+
+    Without date flags: full wipe of all KB tables.
+    With ``--before X`` and/or ``--since X``: row-level delete of entities whose
+    chosen timestamp falls outside the kept range. Cascades to edges + triples.
+
+    Always auto-backs-up to ``<db_path>.bak.<timestamp>`` before any destructive
+    operation, so you can roll forward via ``thought db load`` if you regret it.
+    """
+    if time_axis not in {"created", "valid", "learned"}:
+        err_console.print(f"[red]unknown --time-axis[/red] {time_axis!r}")
+        raise typer.Exit(2)
+    settings = load_settings(_resolve_config(config))
+    bounds_str = ""
+    if before:
+        bounds_str += f" before {before}"
+    if since:
+        bounds_str += f" since {since}"
+    bounds_str = bounds_str or " ALL DATA"
+    if not yes:
+        confirm = Prompt.ask(
+            f"[yellow]Flush KB at [bold]{settings.db_path}[/bold] —{bounds_str} "
+            f"(axis: {time_axis})? [y/N][/yellow]",
+            default="N",
+        )
+        if confirm.strip().lower() not in {"y", "yes"}:
+            console.print("[dim]aborted[/dim]")
+            return
+    # Auto-backup before destructive op.
+    bak = Path(settings.db_path).with_suffix(
+        Path(settings.db_path).suffix
+        + f".bak.{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    )
+    mem = _open_memory(settings)
+    try:
+        mem.backup_to(bak, force=True)
+        console.print(f"  [dim]auto-backup → {bak}[/dim]")
+        result = mem.flush(
+            confirm=True,
+            before=_parse_date(before),
+            since=_parse_date(since),
+            time_axis=time_axis,  # type: ignore[arg-type]
+        )
+    finally:
+        mem.close()
+    table = Table(title="Flush summary", show_header=False, border_style="cyan")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    for k, v in result.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print(f"[green]auto-backup preserved at[/green] {bak}")
+
+
+@db_app.command("backup")
+def db_backup_cmd(
+    file: Path = typer.Argument(..., help="Path to write the snapshot to."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing file."),
+    before: str | None = typer.Option(None, "--before"),
+    since: str | None = typer.Option(None, "--since"),
+    time_axis: str = typer.Option("created", "--time-axis"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Snapshot the current DB to ``file``. Works while the server is running.
+
+    With ``--before`` / ``--since``, the snapshot only contains entities whose
+    chosen timestamp falls within the requested range.
+    """
+    if time_axis not in {"created", "valid", "learned"}:
+        err_console.print(f"[red]unknown --time-axis[/red] {time_axis!r}")
+        raise typer.Exit(2)
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        try:
+            bytes_written = mem.backup_to(
+                file, force=force,
+                before=_parse_date(before),
+                since=_parse_date(since),
+                time_axis=time_axis,  # type: ignore[arg-type]
+            )
+        except FileExistsError as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+    finally:
+        mem.close()
+    console.print(
+        f"  [green][ok][/green] wrote [bold]{_human_bytes(bytes_written)}[/bold] to {file}"
+    )
+
+
+@db_app.command("load")
+def db_load_cmd(
+    file: Path = typer.Argument(..., help="Snapshot file to load."),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    merge: bool = typer.Option(
+        False, "--merge",
+        help="Merge into the existing DB instead of replacing it.",
+    ),
+    before: str | None = typer.Option(None, "--before"),
+    since: str | None = typer.Option(None, "--since"),
+    time_axis: str = typer.Option("created", "--time-axis"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Load a snapshot. Replaces the current DB unless ``--merge`` is set.
+
+    Replace mode auto-backs-up the current DB to ``<db_path>.bak.<timestamp>``
+    before clobbering.
+    """
+    if time_axis not in {"created", "valid", "learned"}:
+        err_console.print(f"[red]unknown --time-axis[/red] {time_axis!r}")
+        raise typer.Exit(2)
+    if not file.exists():
+        err_console.print(f"[red]file not found[/red]: {file}")
+        raise typer.Exit(1)
+    settings = load_settings(_resolve_config(config))
+    if not yes:
+        action = "merge into" if merge else "REPLACE"
+        confirm = Prompt.ask(
+            f"[yellow]{action} {settings.db_path} from {file}? [y/N][/yellow]",
+            default="N",
+        )
+        if confirm.strip().lower() not in {"y", "yes"}:
+            console.print("[dim]aborted[/dim]")
+            return
+    mem = _open_memory(settings)
+    try:
+        try:
+            result = mem.load_from(
+                file, merge=merge,
+                before=_parse_date(before),
+                since=_parse_date(since),
+                time_axis=time_axis,  # type: ignore[arg-type]
+            )
+        except (FileNotFoundError, ValueError) as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+    finally:
+        mem.close()
+
+    if result["action"] == "merge":
+        table = Table(title="Merge summary", show_header=False, border_style="cyan")
+        table.add_column(style="bold")
+        table.add_column(justify="right")
+        for k, v in result.items():
+            if k in {"action", "source"}:
+                continue
+            table.add_row(k, str(v))
+        console.print(table)
+        return
+
+    # Replace mode: do the actual file swap here (Memory is closed).
+    import shutil
+    db_path = Path(settings.db_path)
+    bak = db_path.with_suffix(
+        db_path.suffix + f".bak.{datetime.now().strftime('%Y%m%dT%H%M%S')}"
+    )
+    if db_path.exists():
+        shutil.move(str(db_path), str(bak))
+        # Also stash any WAL/SHM sidecars so the swap is clean.
+        for ext in ("-wal", "-shm"):
+            sidecar = Path(str(db_path) + ext)
+            if sidecar.exists():
+                sidecar.unlink()
+    shutil.copy2(str(file), str(db_path))
+    # Re-open + run migrations so older snapshots upgrade cleanly.
+    mem2 = _open_memory(settings)
+    mem2.close()
+    console.print(
+        f"  [green][ok][/green] loaded {file} → {db_path}\n"
+        f"  [dim]previous DB preserved at {bak}[/dim]"
+    )
+
+
+@db_app.command("inspect")
+def db_inspect_cmd(
+    file: Path = typer.Argument(..., help="Snapshot file to inspect."),
+    schema: bool = typer.Option(
+        False, "--schema", help="Also show entity-type + relation-type counts.",
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show counts (and optional schema breakdown) of a backup file.
+
+    Doesn't touch the active DB — useful for *"is this snapshot worth loading?"*
+    before running ``thought db load``.
+    """
+    if not file.exists():
+        err_console.print(f"[red]file not found[/red]: {file}")
+        raise typer.Exit(1)
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        try:
+            data = mem.inspect_file(file, include_schema=schema)
+        except (FileNotFoundError, ValueError) as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data=data)
+        return
+    table = Table(title=f"Snapshot: {file}", show_header=False, border_style="cyan")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    table.add_row("size", _human_bytes(int(data["size_bytes"])))
+    table.add_row("schema_version", str(data["schema_version"]))
+    table.add_row("entities (current/total)",
+                  f"{data['entities_current']} / {data['entities_total']}")
+    table.add_row("edges", str(data["edges"]))
+    table.add_row("contradictions", str(data["contradictions"]))
+    table.add_row("sources", str(data["sources"]))
+    console.print(table)
+    if schema:
+        et = data.get("entity_types") or {}
+        if et:
+            t = Table(title="entity types", show_header=False, border_style="dim")
+            t.add_column(style="bold")
+            t.add_column(justify="right")
+            for k, v in et.items():
+                t.add_row(k, str(v))
+            console.print(t)
+        rt = data.get("relation_types") or {}
+        if rt:
+            t = Table(title="relation types", show_header=False, border_style="dim")
+            t.add_column(style="bold")
+            t.add_column(justify="right")
+            for k, v in rt.items():
+                t.add_row(k, str(v))
+            console.print(t)
+
+
+@hook_app.command("context")
+def hook_context_cmd(
+    view_name: str = typer.Option(
+        "__startup__", "--view-name",
+        help="Saved view to evaluate and inject at session start.",
+    ),
+    limit: int = typer.Option(20, help="Max rows from the view to inject."),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Auto-context hook for Claude Code's SessionStart event.
+
+    Loads the named saved view (default: ``__startup__``) and emits its
+    result rows as additionalContext. Lets users designate "always know
+    this" facts that surface on every new session.
+
+    v0.4 ships the hook entrypoint and CLI install plumbing. Saved-views
+    integration arrives with the Cypher query layer; until then this hook
+    runs cleanly and emits a no-op skip when the named view doesn't exist.
+    """
+    import json as _json
+    import sys as _sys
+
+    try:
+        raw = _sys.stdin.read()
+        _ = _json.loads(raw) if raw.strip() else {}
+    except _json.JSONDecodeError:
+        # Don't surface as a hook error.
+        return
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        # If the view doesn't exist yet, silently skip — the hook MUST NOT
+        # error out at session-start time.
+        try:
+            row = mem._backend._conn.execute(  # type: ignore[attr-defined]
+                "SELECT cypher_source FROM saved_views WHERE name = ?",
+                (view_name,),
+            ).fetchone()
+        except Exception:
+            row = None  # saved_views table doesn't exist yet (pre-v0.5).
+        if row is None:
+            err_console.print(
+                f"[dim]thought hook context: no saved view {view_name!r}; skipping[/dim]"
+            )
+            return
+        # Cypher execution lands in v0.5; until then echo the view's text so
+        # users can verify the hook is wired up.
+        msg = f"--- thought context view: {view_name} ---\n{row['cypher_source'][:1000]}"
+        console.print(_json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": msg[: limit * 200],
+            }
+        }))
+    finally:
+        mem.close()
 
 
 @hook_app.command("install")
@@ -1263,8 +2090,11 @@ def hook_install_cmd(
     write: bool = typer.Option(
         False, "--write", help="Install the Stop auto-write hook.",
     ),
+    context: bool = typer.Option(
+        False, "--context", help="Install the SessionStart auto-context hook.",
+    ),
     both: bool = typer.Option(
-        False, "--both", help="Install both hooks (shorthand for --recall --write).",
+        False, "--both", help="Install --recall and --write (shorthand).",
     ),
     scope: str = typer.Option(
         "project", help="'project' writes ./.claude/settings.json; 'user' writes ~/.claude/settings.json.",
@@ -1276,9 +2106,10 @@ def hook_install_cmd(
     settings.json.thought.bak before write.
 
     Examples:
-        thought hook install --recall            # auto-recall only
-        thought hook install --both              # auto-recall + auto-write
-        thought hook install --both --scope user # global, all projects
+        thought hook install --recall              # auto-recall only
+        thought hook install --both                # auto-recall + auto-write
+        thought hook install --both --context      # also SessionStart
+        thought hook install --both --scope user   # global, all projects
     """
     from .hooks import install as hook_install
     if scope not in {"project", "user"}:
@@ -1289,9 +2120,11 @@ def hook_install_cmd(
         kinds.append("recall")
     if both or write:
         kinds.append("write")
+    if context:
+        kinds.append("context")
     if not kinds:
         err_console.print(
-            "[red]specify at least one of --recall / --write / --both[/red]"
+            "[red]specify at least one of --recall / --write / --both / --context[/red]"
         )
         raise typer.Exit(2)
     results = hook_install.install_many(tuple(kinds), scope=scope)  # type: ignore[arg-type]

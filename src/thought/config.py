@@ -18,17 +18,34 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class EmbeddingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    choice: Literal["auto", "deterministic", "minilm", "bge-m3", "openai"] = "auto"
+    choice: Literal[
+        "auto", "deterministic", "minilm", "bge-m3",
+        # v0.4 — local-LLM + remote OpenAI-compatible:
+        "ollama", "lmstudio", "openai-compat", "openai",
+    ] = "auto"
     dim: int = 384
     model_name: str | None = None
+    # Ollama (native API)
+    ollama_host: str = "http://localhost:11434"
+    ollama_model: str = "nomic-embed-text"
+    # LM Studio (OpenAI-compatible)
+    lmstudio_url: str = "http://localhost:1234/v1"
+    lmstudio_model: str = "nomic-embed-text-v1.5"
+    # Generic OpenAI-compatible (vLLM, llama.cpp, OpenAI proper, …)
+    openai_compat_url: str = "http://localhost:8000/v1"
+    openai_compat_model: str = "text-embedding-3-small"
+    openai_compat_api_key: str = ""  # blank for local servers
 
 
 class LLMConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
-    provider: Literal["anthropic", "openai", "ollama", "none"] = "none"
+    provider: Literal[
+        "anthropic", "openai", "openai-compat", "ollama", "lmstudio", "none",
+    ] = "none"
     model: str | None = None
     base_url: str | None = None
+    api_key: str = ""
 
 
 class ServerConfig(BaseModel):
@@ -93,4 +110,17 @@ def load_settings(path: str | Path | None = None) -> Settings:
         data["db_path"] = env_db
     if env_emb := os.environ.get("THOUGHT_EMBEDDER"):
         data.setdefault("embedding", {})["choice"] = env_emb
+    # v0.4: local-LLM provider env overrides
+    emb_overrides = {
+        "THOUGHT_OLLAMA_HOST": "ollama_host",
+        "THOUGHT_OLLAMA_MODEL": "ollama_model",
+        "THOUGHT_LMSTUDIO_URL": "lmstudio_url",
+        "THOUGHT_LMSTUDIO_MODEL": "lmstudio_model",
+        "THOUGHT_OPENAI_COMPAT_URL": "openai_compat_url",
+        "THOUGHT_OPENAI_COMPAT_MODEL": "openai_compat_model",
+        "THOUGHT_OPENAI_COMPAT_API_KEY": "openai_compat_api_key",
+    }
+    for env_key, cfg_key in emb_overrides.items():
+        if v := os.environ.get(env_key):
+            data.setdefault("embedding", {})[cfg_key] = v
     return Settings.model_validate(data)

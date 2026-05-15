@@ -7,6 +7,114 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] — 2026-05-15 — DB lifecycle + Local LLMs + Cypher + Ask
+
+A big release. Four feature areas combine to make THOUGHT a complete local-AI
+memory tool — manage the KB, run on local models, write graph queries, and
+ask in English.
+
+### Added
+
+#### DB lifecycle (`thought db ...`)
+- **`db size`** — disk usage of main + WAL + SHM sidecars + entity/edge counts.
+- **`db flush`** — wipe the KB. Defaults to full flush; ``--before X`` /
+  ``--since X`` / ``--time-axis valid|learned|created`` for date-bounded
+  deletes. Interactive confirmation by default; ``--yes`` skips. Always
+  auto-backs-up to ``<db>.bak.<timestamp>`` before destructive operations.
+- **`db backup <file>`** — SQLite online-backup snapshot. Date filters
+  produce a clean, self-contained subset file (DELETE + VACUUM after backup).
+  ``--force`` to overwrite.
+- **`db load <file>`** — atomically replace the active DB (or ``--merge``
+  to INSERT-OR-IGNORE rows from the snapshot). Date filters apply to
+  both modes. Auto-backs-up the current DB before replace.
+- **`db inspect <file>``** — counts + (optional) schema summary of a backup
+  file without loading it. The *"is this snapshot worth loading?"* primitive.
+- New backend primitives ([src/thought/storage/sqlite/backend.py](src/thought/storage/sqlite/backend.py)):
+  ``file_sizes`` / ``checkpoint_wal`` / ``flush`` / ``backup_to`` /
+  ``merge_from`` / ``open_readonly`` classmethod for read-only inspection.
+- WAL checkpoint in ``close()`` so backups always see a consistent file.
+
+#### Local-LLM integration (Ollama + LM Studio + any OpenAI-compatible server)
+- **`OllamaEmbedder`** — talks Ollama's native ``/api/embed`` (batched) with
+  legacy ``/api/embeddings`` fallback. Auto-validates dim mismatch with
+  clear error messages.
+- **`OpenAICompatibleEmbedder`** + **`LMStudioEmbedder`** + **`OpenAIEmbedder``** —
+  same embedder serves LM Studio, vLLM, llama.cpp ``--api``, text-generation-webui,
+  and OpenAI proper. Optional ``api_key``.
+- New embedder choices: ``ollama`` / ``lmstudio`` / ``openai-compat`` / ``openai``.
+- ``thought.toml`` ``[embedding]`` gains ollama_host / ollama_model /
+  lmstudio_url / lmstudio_model / openai_compat_url / openai_compat_model /
+  openai_compat_api_key fields. Env overrides for all of them.
+- **LLM-extract dispatch** — [src/thought/hooks/write.py](src/thought/hooks/write.py)'s
+  ``_extract_facts()`` now dispatches on ``[llm] provider``: anthropic /
+  ollama / lmstudio / openai-compat / openai / none. Auto-write ``--mode
+  extract`` is now zero-API-cost for Ollama / LM Studio users.
+- **`thought ollama-setup`** + **`thought lmstudio-setup`** — daemon ping +
+  model discovery + ``thought.toml`` snippet. ``--write`` rewrites the config.
+- **`thought reembed --to <choice>``** — re-embed every entity through a
+  different embedder. Lets you start with ``deterministic`` and upgrade to
+  Ollama / sentence-transformers later without re-ingesting from source.
+
+#### Cypher query layer (subset)
+- **`thought query "<cypher>"`** — run a documented Cypher subset against
+  the live KB. Pattern matching, property filters, edge traversal, WHERE
+  with AND, RETURN with property projection or full-row JSON, AS_OF for
+  time-travel, LIMIT / SKIP. ``--explain`` shows the emitted SQL.
+- Out-of-subset features raise ``UnsupportedCypher`` with a pointer to the
+  README — no surprises, no half-working execution.
+- **Saved views**: ``thought view save/list/run/show/delete <name>``.
+  Stored as a row in the new ``saved_views`` table (migration 0003,
+  schema_version → 3). Pull-evaluated on each ``view run`` against the
+  live KB — the "derived memory construct" primitive.
+- New MCP tools: ``schema``, ``query``, ``view_save``, ``view_list``,
+  ``view_run``, ``view_delete``. Agents can compose Cypher and persist
+  named views directly.
+
+#### `thought ask` — natural-language wrapper
+- **`thought ask "<english question>"`** — emits Cypher via whichever LLM
+  is configured in ``[llm] provider`` (anthropic / ollama / lmstudio /
+  openai-compat / openai). Validates against the parser before executing;
+  bad translations degrade gracefully to ``recall(question)`` so the user
+  always gets something.
+- ``--explain`` shows the emitted Cypher + SQL before results.
+- ``--save-as <name>`` persists a successful translation as a named view —
+  harvest good NL queries into durable saved views.
+- ``--no-fallback`` for scripted workflows that need to fail loudly.
+
+#### Schema introspection
+- **`thought schema`** + ``mcp__thought__schema()`` — entity-type + relation-type
+  counts. Tells humans and LLMs alike what's queryable before composing Cypher.
+
+#### SessionStart auto-context hook
+- **`thought hook install --context`** registers a SessionStart hook that
+  evaluates a designated saved view (default ``__startup__``) and injects
+  the result as ``additionalContext`` at the start of every Claude Code
+  session.
+
+### Changed
+- ``Memory.open`` accepts an optional ``embedding_cfg`` parameter so local-
+  LLM embedders pick up their provider-specific config from ``thought.toml``.
+- Migration runner adds ``0003_views.sql``; ``schema_version`` bumps to 3.
+
+### Internal
+- 295 tests pass (was 197 at v0.3.0). +98 new tests across DB lifecycle,
+  Ollama, OpenAI-compat, reembed, hook write provider dispatch, setup
+  helpers, SessionStart hook, Cypher lex/parse/compile/execute, saved
+  views CRUD, ``ask`` mocked-provider dispatch, and CLI surface for every
+  new command.
+- Comparison harness re-run: 83.5% recall@10 (unchanged vs v0.3.0). No
+  regression from the new ingest / query paths.
+
+### Notes
+- Cypher subset is read-only in v0.4. Writes still go through ``remember``
+  / ``thought ingest`` / the auto-write hook. ``MERGE`` / ``CREATE`` /
+  ``DELETE`` raise ``UnsupportedCypher`` at parse time.
+- Variable-length paths (``-[:R*1..N]->``) are not supported in v0.4 — use
+  multi-step explicit patterns. Documented in the README's supported-subset
+  table.
+
+---
+
 ## [0.3.0] — 2026-05-15 — Auto-write + auto-recall + topic browsing
 
 ### Added
@@ -313,6 +421,7 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.4.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.3.0
 [0.2.2]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.2
 [0.2.1]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.1

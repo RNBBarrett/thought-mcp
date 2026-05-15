@@ -105,3 +105,55 @@ class StorageBackend(ABC):
         source_ref: str,
         at: datetime,
     ) -> str: ...
+
+    # ---- v0.4 db lifecycle ----
+
+    @abstractmethod
+    def file_sizes(self) -> dict[str, int]:
+        """On-disk size in bytes for main / wal / shm + total. 0 for missing sidecars."""
+        ...
+
+    @abstractmethod
+    def checkpoint_wal(self) -> None:
+        """Force a WAL TRUNCATE checkpoint. Used before backups."""
+        ...
+
+    @abstractmethod
+    def flush(
+        self,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> dict[str, int]:
+        """Wipe data from the KB. Destructive.
+
+        Full flush (no date bounds) drops + recreates user tables. Date-bounded
+        flush deletes entities whose chosen timestamp falls outside the kept
+        range; cascades clean up edges / triples / embeddings.
+        """
+        ...
+
+    @abstractmethod
+    def backup_to(
+        self,
+        target_path,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> int:
+        """Snapshot the DB to ``target_path``. Returns bytes written."""
+        ...
+
+    @abstractmethod
+    def merge_from(
+        self,
+        source_path,
+        *,
+        before: datetime | None = None,
+        since: datetime | None = None,
+        time_axis: str = "created",
+    ) -> dict[str, int]:
+        """Merge another DB file into this one. Returns {new_*: count} by table."""
+        ...

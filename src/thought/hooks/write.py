@@ -126,6 +126,7 @@ def run(
     scope: str = "private",
     owner_id: str | None = None,
     unique_predicates: frozenset[str] | None = None,
+    llm_cfg: object | None = None,
 ) -> dict[str, Any]:
     """Execute one auto-write hook invocation.
 
@@ -142,7 +143,7 @@ def run(
     items: list[dict[str, Any]] = []
     if mode == "extract":
         for _role, body in pairs:
-            for fact in _extract_facts(body):
+            for fact in _extract_facts(body, llm_cfg=llm_cfg):
                 items.append({
                     "content": fact,
                     "scope": scope, "owner_id": owner_id,
@@ -169,57 +170,161 @@ def run(
     }
 
 
-def _extract_facts(text: str) -> list[str]:
-    """LLM-extract durable facts from a conversation turn.
+EXTRACT_PROMPT = (
+    "Extract durable, third-person factual statements from the following "
+    "conversation turn. Output one fact per line, no numbering, no "
+    "preamble. Skip ephemeral content (greetings, hedging, in-progress "
+    "thoughts). If no durable facts are present, output nothing.\n\n"
+    "---\n{text}\n---"
+)
 
-    Calls the Anthropic API with Haiku-class model. Returns ``[]`` and warns
-    on stderr if the SDK or ``ANTHROPIC_API_KEY`` is unavailable — callers
-    fall back to raw mode in that case.
+
+def _extract_facts(text: str, *, llm_cfg: object | None = None) -> list[str]:
+    """Dispatch to the configured LLM provider for fact extraction.
+
+    Provider precedence:
+    1. ``llm_cfg.provider`` if supplied
+    2. Anthropic (back-compat for hooks installed in v0.3 without llm config)
+
+    Falls back to returning ``[text]`` (raw mode equivalent) with a clear
+    stderr message when the configured provider is unavailable.
     """
+    provider = getattr(llm_cfg, "provider", None) or "anthropic"
+    if provider == "none":
+        return [text]
+    if provider == "anthropic":
+        return _extract_via_anthropic(text, llm_cfg)
+    if provider == "ollama":
+        return _extract_via_ollama(text, llm_cfg)
+    if provider in {"lmstudio", "openai-compat", "openai"}:
+        return _extract_via_openai_compat(text, llm_cfg, provider=provider)
+    print(
+        f"thought hook write: unknown llm provider {provider!r}; falling back to raw.",
+        file=sys.stderr,
+    )
+    return [text]
+
+
+def _extract_via_anthropic(text: str, llm_cfg: object | None) -> list[str]:
     try:
         import anthropic
     except ImportError:
         print(
-            "thought hook write: --mode extract requires "
+            "thought hook write: --mode extract anthropic requires "
             "'pip install thought-mcp[llm-anthropic]'; falling back to raw mode.",
             file=sys.stderr,
         )
         return [text]
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(
-            "thought hook write: --mode extract requires ANTHROPIC_API_KEY; "
+            "thought hook write: --mode extract anthropic requires ANTHROPIC_API_KEY; "
             "falling back to raw mode.",
             file=sys.stderr,
         )
         return [text]
-
+    model = getattr(llm_cfg, "model", None) or "claude-haiku-4-5-20251001"
     client = anthropic.Anthropic()
-    prompt = (
-        "Extract durable, third-person factual statements from the following "
-        "conversation turn. Output one fact per line, no numbering, no "
-        "preamble. Skip ephemeral content (greetings, hedging, in-progress "
-        "thoughts). If no durable facts are present, output nothing.\n\n"
-        f"---\n{text}\n---"
-    )
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=model,
             max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text)}],
         )
         body = "".join(
             block.text  # type: ignore[union-attr]
             for block in resp.content
             if getattr(block, "type", None) == "text"
         )
-    except Exception as e:  # pragma: no cover — network / quota errors
+    except Exception as e:
         print(
-            f"thought hook write: extract LLM call failed ({e}); falling back to raw.",
+            f"thought hook write: anthropic extract failed ({e}); falling back to raw.",
             file=sys.stderr,
         )
         return [text]
-    facts = [line.strip() for line in body.splitlines() if line.strip()]
-    return facts
+    return [line.strip() for line in body.splitlines() if line.strip()]
+
+
+def _extract_via_ollama(text: str, llm_cfg: object | None) -> list[str]:
+    try:
+        import httpx
+    except ImportError:
+        print(
+            "thought hook write: ollama extract requires 'pip install thought-mcp[llm-ollama]'; "
+            "falling back to raw mode.",
+            file=sys.stderr,
+        )
+        return [text]
+    host = (getattr(llm_cfg, "base_url", None) or "http://localhost:11434").rstrip("/")
+    model = getattr(llm_cfg, "model", None) or "mistral"
+    try:
+        r = httpx.post(
+            f"{host}/api/generate",
+            json={"model": model, "prompt": EXTRACT_PROMPT.format(text=text), "stream": False},
+            timeout=60.0,
+        )
+        r.raise_for_status()
+        body = r.json().get("response", "")
+    except Exception as e:
+        print(
+            f"thought hook write: ollama extract failed ({e}); falling back to raw.",
+            file=sys.stderr,
+        )
+        return [text]
+    return [line.strip() for line in body.splitlines() if line.strip()]
+
+
+def _extract_via_openai_compat(
+    text: str,
+    llm_cfg: object | None,
+    *,
+    provider: str,
+) -> list[str]:
+    try:
+        import httpx
+    except ImportError:
+        print(
+            f"thought hook write: {provider} extract requires httpx; falling back to raw.",
+            file=sys.stderr,
+        )
+        return [text]
+    # Provider defaults.
+    if provider == "lmstudio":
+        default_base = "http://localhost:1234/v1"
+        default_model = "openai/gpt-oss-20b"
+    elif provider == "openai":
+        default_base = "https://api.openai.com/v1"
+        default_model = "gpt-4o-mini"
+    else:  # openai-compat
+        default_base = "http://localhost:8000/v1"
+        default_model = "gpt-4o-mini"
+    base_url = (getattr(llm_cfg, "base_url", None) or default_base).rstrip("/")
+    model = getattr(llm_cfg, "model", None) or default_model
+    api_key = getattr(llm_cfg, "api_key", "") or os.environ.get("OPENAI_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        r = httpx.post(
+            f"{base_url}/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": EXTRACT_PROMPT.format(text=text)},
+                ],
+                "stream": False,
+                "max_tokens": 512,
+            },
+            headers=headers,
+            timeout=60.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        body = data["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(
+            f"thought hook write: {provider} extract failed ({e}); falling back to raw.",
+            file=sys.stderr,
+        )
+        return [text]
+    return [line.strip() for line in body.splitlines() if line.strip()]
 
 
 def cli_main(
@@ -230,6 +335,8 @@ def cli_main(
     owner_id: str | None = None,
     embedder_choice: str = "auto",
     embedder_dim: int = 384,
+    embedding_cfg=None,
+    llm_cfg=None,
 ) -> int:
     """CLI entrypoint. Reads stdin, writes a one-line summary on stderr,
     returns exit code 0 unless we couldn't even parse the payload."""
@@ -243,11 +350,13 @@ def cli_main(
         db_path=db_path,
         embedder_choice=embedder_choice,
         embedder_dim=embedder_dim,
+        embedding_cfg=embedding_cfg,
     )
     try:
         summary = run(
             memory=mem, payload=payload,
             mode=mode, scope=scope, owner_id=owner_id,
+            llm_cfg=llm_cfg,
         )
     finally:
         mem.close()

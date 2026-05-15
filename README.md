@@ -1285,6 +1285,14 @@ Coverage target: 85% on `src/thought`. CI matrix runs Python 3.11/3.12/3.13 × U
 
 ---
 
+## Star history
+
+If this is useful, ⭐ the repo so others can find it.
+
+[![Star History Chart](https://api.star-history.com/svg?repos=RNBBarrett/thought-mcp&type=Date)](https://star-history.com/#RNBBarrett/thought-mcp&Date)
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

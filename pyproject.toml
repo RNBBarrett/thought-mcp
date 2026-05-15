@@ -10,17 +10,31 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Richard Barrett" }]
-keywords = ["mcp", "memory", "llm", "knowledge-graph", "graphrag", "vector-search", "temporal", "ai"]
+keywords = [
+    "mcp", "mcp-server", "model-context-protocol",
+    "memory", "agent-memory", "llm-memory",
+    "llm", "ai", "anthropic", "claude-code", "claude",
+    "knowledge-graph", "graphrag", "hipporag", "cypher",
+    "vector-search", "embeddings", "rag", "retrieval-augmented-generation",
+    "temporal", "bi-temporal",
+    "ollama", "lm-studio", "local-llm",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 
 dependencies = [

@@ -1,0 +1,85 @@
+name: Bug report
+description: Something works incorrectly or crashes.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Concise reproducers help us fix things fast.
+  - type: input
+    id: version
+    attributes:
+      label: thought-mcp version
+      description: Output of `thought --version`
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Docker (GHCR)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client (if applicable)
+      options:
+        - Claude Code (CLI)
+        - Cursor
+        - Cline
+        - Continue
+        - Windsurf
+        - Other / direct CLI
+        - N/A
+  - type: dropdown
+    id: embedder
+    attributes:
+      label: Embedder
+      options:
+        - auto (default)
+        - deterministic
+        - minilm (sentence-transformers)
+        - ollama
+        - lmstudio
+        - openai-compat
+        - openai
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Reproducer
+      description: Minimal commands that trigger the bug. Output of failing commands or stack traces welcome.
+      placeholder: |
+        thought init --embedder deterministic --quick
+        thought ingest "..."
+        thought recall "..."
+        # → stack trace goes here
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: thought doctor output
+      description: |
+        Paste the output of `thought doctor` so we can see your environment.
+      render: shell

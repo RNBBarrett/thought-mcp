@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: |
+        What are you trying to do? What's blocking you today, or what's
+        awkward enough that you'd reach for this if it existed?
+      placeholder: |
+        I have a long-running KB and I want to ... but today the only way is ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        A sketch of what the user-facing surface would look like. A CLI
+        command, an MCP tool, a config flag, a new method on Memory, etc.
+      placeholder: |
+        thought <new-command> <args>      # what it does
+        # or
+        mcp__thought__<new_tool>(...)     # what the agent calls
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried; existing features that almost solve it.
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Rough scope
+      options:
+        - Small change (new flag, small bug fix, doc)
+        - Medium (new CLI command, new MCP tool, minor schema change)
+        - Large (new subsystem, schema migration, breaking API change)
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Would you like to contribute?
+      options:
+        - label: I'd like to send a PR for this if we agree on the approach.

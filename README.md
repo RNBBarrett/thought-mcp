@@ -293,10 +293,44 @@ By default, THOUGHT only writes when the agent calls `remember` and only reads w
 ```bash
 # In your project root:
 thought hook install --both           # installs into ./.claude/settings.json
-# (or --recall / --write to pick one, or --scope user for global)
+# (or --recall / --write to pick one)
 
 # Restart Claude Code.
 ```
+
+#### Project scope vs. user scope — which one do you want?
+
+`thought hook install` has two scopes, and the right pick depends on whether you want a per-project memory or one memory shared across everything:
+
+```bash
+thought hook install --both                   # default: --scope project
+thought hook install --both --scope user      # global: every Claude Code session
+```
+
+| Scope | Settings file | What it covers | When to pick it |
+|---|---|---|---|
+| `project` (default) | `./.claude/settings.json` | Only Claude Code sessions launched in *this* directory | You want a project-local KB; you have a `thought.toml` here and you don't want this project's memory mixing with others. |
+| `user` | `~/.claude/settings.json` | *Every* Claude Code session this user runs, anywhere | You want a single lifelong KB that follows you across projects, and you're OK with all projects writing into the same memory. |
+
+Honest caveat for `--scope user`: the hooks resolve `thought.toml` (and therefore the SQLite db path) relative to whatever cwd Claude Code is launched in. If you start a session in a directory without a `thought.toml`, the hook still runs — but the ingest pipeline will silently fail to land anything because there's no configured db. The hook returns exit-code 0 so it doesn't break your turn (just emits a one-line warning to Claude Code's MCP log).
+
+The clean "one shared KB across every project" recipe:
+
+```powershell
+# 1. Pick an absolute path for your lifelong memory.
+$env:THOUGHT_DB_PATH = "$env:USERPROFILE\.thought\global.db"
+# (Put that line in your $PROFILE on Windows or ~/.zshrc on macOS.)
+
+# 2. Initialize once at that path.
+thought init --db-path "$env:THOUGHT_DB_PATH" --no-claude-md
+
+# 3. Install hooks globally.
+thought hook install --both --scope user
+```
+
+Now every Claude Code session — in any directory — auto-reads + auto-writes the same global KB. Pair it with `thought stats` from any terminal to see what's accumulated.
+
+To remove hooks later: delete the relevant block from `.claude/settings.json` (project or user), or rerun `thought hook install` with different flags after first removing the existing entries (the installer is additive — it doesn't strip stale entries).
 
 From that point on:
 

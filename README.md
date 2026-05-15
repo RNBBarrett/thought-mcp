@@ -6,10 +6,20 @@
 [![CI](https://github.com/RNBBarrett/thought-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/RNBBarrett/thought-mcp/actions/workflows/ci.yml)
 [![Docker](https://github.com/RNBBarrett/thought-mcp/actions/workflows/docker.yml/badge.svg)](https://github.com/RNBBarrett/thought-mcp/actions/workflows/docker.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-thought--mcp-blue?logo=docker)](https://github.com/RNBBarrett/thought-mcp/pkgs/container/thought-mcp)
+[![Status: Experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#status--contributions)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **T**emporal **H**ierarchical **O**bject **U**nion & **G**raph **H**ybrid **T**oolkit — a local MCP memory server that gives any LLM a persistent, auditable memory fabric on your own machine.
 
 > OB1 stores your thoughts. Karpathy's wiki compiles your knowledge. **THOUGHT** remembers with provenance, understands relationships, detects contradictions, never forgets what used to be true — and routes every query to the right mathematical structure before touching a single byte of data.
+
+### Status & contributions
+
+**THOUGHT is experimental software.** Expect rough edges, surface changes between minor versions, and the occasional sharp corner — especially in the v0.4 query layer and local-LLM paths. APIs that the README documents are stable enough to build against, but anything described as a "subset" or marked "v0.4+" is still settling.
+
+**The project aims to improve on existing context / memory systems** for LLM agents. The closest comparables are Mem0, Letta/MemGPT, Zep, and Graphiti — each shipped impressive work; THOUGHT bets that bi-temporal validity windows, typed-edge contradiction handling, HippoRAG-style Personalized PageRank retrieval, and a real Cypher query surface combine into a more honest memory substrate. The [comparison harness](docs/comparison.md) tracks how we're doing against simpler baselines.
+
+**Contributors are wanted and welcome.** Everything from typo fixes to new embedder backends to a Postgres adapter to better evaluations. See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, test commands, PR norms, and the maintainer release runbook. Open an issue for architecture-level changes before sending a PR so we can align on direction. First-time contributors: pick anything labelled `good first issue` (or open an issue + we'll find one for you).
 
 ---
 

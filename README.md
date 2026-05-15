@@ -13,7 +13,48 @@
 
 ---
 
-## ✨ New in v0.2 — Memory for AI coding agents
+## ✨ New in v0.3 — Auto-memory + topic browsing
+
+**Memory that captures + retrieves itself, plus a way to see what's in there.** Wire two Claude Code hooks into your project, restart, and from that point on every assistant turn is auto-ingested and every user prompt is pre-recalled against the KB — no explicit `remember` / `recall` calls needed. Discoverability: a new `thought topics` command lists what the KB *contains* (people, places, functions, concepts…) and `thought browse <topic>` drills into a specific area.
+
+```bash
+# One command wires both hooks into Claude Code (project-scoped settings.json).
+thought hook install --both
+
+# What's in my memory right now?
+thought topics
+#  type           count  examples
+#  CONCEPT        89     Acme, Adidas, dessert
+#  function       425    personalized_pagerank, recall, remember
+#  PERSON         47     Alice, Bob, Dana
+#  ORGANIZATION   12     Acme Corp, Beta, OpenAI
+
+# Drill into a topic (or an entity name)
+thought browse dessert --depth 2
+#  #   type     entity   score
+#  1   CONCEPT  donut    0.42
+#  2   CONCEPT  cake     0.31
+#  3   CONCEPT  pastry   0.18
+```
+
+The auto-recall hook uses the `additionalContext` field on Claude Code's `UserPromptSubmit` event (10k-char cap, low-confidence gated so it doesn't pollute context). The auto-write hook runs on `Stop`, picks the last user + last assistant turns out of the session transcript, and pipes them into the existing ingest pipeline — content-sha256 idempotency + Jaccard dedup keep replays from doubling the KB. Optional `--mode extract` routes each turn through Haiku first for higher-signal facts (~$0.001/turn).
+
+Two new MCP tools are also exposed for agents that want the discoverability primitives directly: **`mcp__thought__list_topics`** and **`mcp__thought__browse_topic`**.
+
+What's in the bi-temporal model already does the heavy lifting on contradictions — if you say "I prefer Adidas" on Monday and "I prefer Nike" on Friday, the second auto-write supersedes the first via a `CONTRADICTS` + `SUPERSEDES` edge pair, exactly like Zep's temporal validity windows from the recent literature.
+
+```bash
+# Per-hook install if you'd rather pick them à la carte:
+thought hook install --recall          # auto-recall only
+thought hook install --write           # auto-write only
+thought hook install --write --scope user  # global to your home dir
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for the full v0.3 list. v0.2's code-vertical surface (below) and v0.1's horizontal-memory surface are unchanged — v0.3 is purely additive.
+
+---
+
+## ✨ Previously in v0.2 — Memory for AI coding agents
 
 v0.2 specialises the same architecture for the workflow with the strongest natural fit: **AI-assisted coding**. THOUGHT now parses your source with tree-sitter, builds a real function-call graph as typed edges, and stamps every fact with its git commit. The bi-temporal `as_of` queries you already had now answer *"what did the codebase look like at commit X?"* for free.
 
@@ -244,6 +285,61 @@ To insist on storing something:
 - *"Add to memory: ..."*
 
 The single highest-leverage thing is the **`CLAUDE.md`** file that `thought init` drops in your project. Edit it to add project-specific conventions. The AI reads it on every session start, so rules like *"always remember architectural decisions, never remember code snippets"* are honored consistently.
+
+### Auto-memory: capture + recall without thinking about it
+
+By default, THOUGHT only writes when the agent calls `remember` and only reads when it calls `recall`. That works, but it puts the burden on the agent to *remember to remember*. In v0.3 you can wire two Claude Code hooks that do it for you:
+
+```bash
+# In your project root:
+thought hook install --both           # installs into ./.claude/settings.json
+# (or --recall / --write to pick one, or --scope user for global)
+
+# Restart Claude Code.
+```
+
+From that point on:
+
+- **Every user turn** → the auto-recall hook runs `thought hook recall` against the prompt, pulls the top-5 hits, and injects them into the next turn's context via Claude Code's `additionalContext` field (10k-char cap). The hook gates on the existing `low_confidence` flag from CRAG, so when there's nothing relevant it stays silent rather than pushing a "no hits" banner into context.
+- **Every assistant turn end** → the auto-write hook runs `thought hook write` against the session transcript, picks the last user + last assistant turn, and pipes them into the existing ingest pipeline. Content-sha256 idempotency + Jaccard dedup absorb replays so the KB doesn't bloat.
+
+If you want higher-signal writes at the cost of a small per-turn LLM call, switch to extract mode:
+
+```bash
+# Set ANTHROPIC_API_KEY, then edit .claude/settings.json:
+#   "command": "thought hook write --mode extract"
+# Each turn is now routed through Haiku to distill durable facts before ingest.
+```
+
+Auto-write writes default to `scope=private` so multi-user deployments don't accidentally cross-pollinate user-specific facts. The bi-temporal model already handles contradictions: if the user says "I prefer Adidas" one day and "I prefer Nike" the next, the second auto-write supersedes the first via `CONTRADICTS` + `SUPERSEDES` edges — exactly the temporal-validity-window pattern from Zep / Graphiti's 2025 work.
+
+To opt out for a turn, just don't trigger the hooks (e.g. with a `--no-hooks` flag in Claude Code, or by uninstalling the hooks from `.claude/settings.json`).
+
+### Browsing what's in your memory
+
+Two new commands answer the "what does the agent actually know?" question without writing a query:
+
+```bash
+# What kinds of facts are stored?
+thought topics
+#  type           count  examples
+#  CONCEPT        89     Acme, Adidas, dessert
+#  function       425    personalized_pagerank, recall, remember
+#  PERSON         47     Alice, Bob, Dana
+#  ORGANIZATION   12     Acme Corp, Beta, OpenAI
+
+# Drill into a type (everything of that kind)
+thought browse CONCEPT --limit 20
+
+# Drill into a specific anchor (PPR-ranked neighbourhood)
+thought browse Acme --depth 2
+
+# JSON output for scripting
+thought topics --json
+thought browse Alice --json
+```
+
+The agent itself can use the same surface via `mcp__thought__list_topics` and `mcp__thought__browse_topic` — useful in prompts like *"first survey what we already know about authentication, then suggest changes"*.
 
 ### Working with code — the v0.2 capabilities
 
@@ -587,8 +683,8 @@ thought install --detect          # show every detected MCP client config path
 thought install --client cursor   # wire one client (with backup, idempotent)
 thought install --all             # wire every detected client
 thought start [--client cursor]   # init-if-needed + install + serve in one command
-thought serve [--host ... --port ... --skip-precheck]
-                                  # start MCP server on Streamable HTTP
+thought serve [--transport stdio|streamable-http] [--host ... --port ...]
+                                  # start MCP server (stdio by default; HTTP optional)
 thought doctor                    # deep environment health check
 thought --version
 ```
@@ -621,6 +717,25 @@ thought stats                     # entities / edges / sources / contradictions 
 thought repl                      # interactive shell — type queries, +text to remember
 thought forget 'kendra%'          # soft-delete by SQL LIKE pattern (audit-logged)
 thought consolidate               # run one consolidation cycle
+```
+
+### Auto-memory + topic browsing (v0.3)
+
+```bash
+thought hook install --recall            # auto-recall: UserPromptSubmit → recall + inject
+thought hook install --write             # auto-write: Stop → ingest the last turn
+thought hook install --both              # both, idempotent
+thought hook install --both --scope user # globally for all projects, not just this one
+
+# The hook subcommands themselves (called by Claude Code, not by you):
+thought hook recall                      # stdin: hook payload → stdout: additionalContext
+thought hook write [--mode raw|extract]  # stdin: hook payload → ingests transcript
+
+# Browsing
+thought topics [--scope all|shared|private] [--min-count N] [--json]
+                                         # entity-type aggregations with examples
+thought browse <name> [--depth 1] [--limit 20] [--json]
+                                         # drill into a type or an entity name
 ```
 
 ### Code-vertical commands (v0.2)

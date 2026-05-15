@@ -83,4 +83,46 @@ def build_app(memory: Memory):
             return r.model_dump(mode="json")
         return await asyncio.to_thread(_do)
 
+    @app.tool()
+    async def list_topics(
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+        min_count: int = 1,
+    ) -> dict:
+        """List entity-type buckets currently in the KB.
+
+        Returns ``{"topics": [{"type": "...", "count": N, "examples": [...]}]}``
+        ordered by population descending. Cheap aggregation — single SQL
+        GROUP BY. Use this to discover what *kinds* of facts the memory holds
+        before drilling down with ``browse_topic``.
+        """
+        def _do() -> dict:
+            return {"topics": memory.list_topics(
+                scope=scope, owner_id=owner_id, min_count=min_count,
+            )}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def browse_topic(
+        name: str,
+        depth: int = 1,
+        limit: int = 20,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+    ) -> dict:
+        """Drill into a topic by name.
+
+        ``name`` is matched first against entity-type names (``PERSON``,
+        ``CONCEPT``, ``function``, …) for a type facet; if no type matches,
+        it's resolved as an entity name and the PPR-ranked neighbourhood is
+        returned. Returns ``{"items": [{"id", "name", "type", "score", "via"}]}``
+        where ``via`` is one of ``type_facet`` / ``ppr`` / ``bfs``.
+        """
+        def _do() -> dict:
+            return {"items": memory.browse_topic(
+                name, depth=depth, limit=limit,
+                scope=scope, owner_id=owner_id,
+            )}
+        return await asyncio.to_thread(_do)
+
     return app

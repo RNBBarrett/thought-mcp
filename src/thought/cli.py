@@ -49,6 +49,11 @@ app = typer.Typer(
     help="THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. "
          "Local MCP memory for any LLM client.",
 )
+hook_app = typer.Typer(
+    name="hook",
+    help="Claude Code hook integrations for auto-write + auto-recall.",
+)
+app.add_typer(hook_app, name="hook")
 console = Console(stderr=False)
 err_console = Console(stderr=True)
 
@@ -907,6 +912,99 @@ def ingest_git_cmd(
 
 
 @app.command()
+def topics(
+    scope: str = typer.Option("all", help="'shared', 'private', or 'all'."),
+    owner_id: str | None = typer.Option(None),
+    min_count: int = typer.Option(1, help="Only show types with >= this many entities."),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of pretty output."),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show entity-type buckets in the KB ('topics').
+
+    First step in topic browsing: see what *kinds* of facts the memory
+    holds (PERSON, ORGANIZATION, CONCEPT, function, …) before drilling
+    into specifics with ``thought browse <name>``.
+    """
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        result = mem.list_topics(
+            scope=scope, owner_id=owner_id,  # type: ignore[arg-type]
+            min_count=min_count,
+        )
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"topics": result})
+        return
+    if not result:
+        console.print("[dim]no topics — KB is empty[/dim]")
+        return
+    table = Table(title="Topics in memory", border_style="cyan")
+    table.add_column("type", style="bold")
+    table.add_column("count", justify="right")
+    table.add_column("examples")
+    for t in result:
+        table.add_row(
+            str(t["type"]),
+            str(t["count"]),
+            ", ".join(t["examples"]) if t["examples"] else "",  # type: ignore[arg-type]
+        )
+    console.print(table)
+
+
+@app.command()
+def browse(
+    name: str = typer.Argument(..., help="Topic name: a type ('PERSON') or an entity ('dessert')."),
+    depth: int = typer.Option(1, help="Graph-traversal depth when drilling into an entity."),
+    limit: int = typer.Option(20),
+    scope: str = typer.Option("all"),
+    owner_id: str | None = typer.Option(None),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Drill into a topic.
+
+    ``name`` is matched against entity-type names first ('PERSON',
+    'function', 'CONCEPT' …); if no type matches it's treated as an
+    entity name and the PPR-ranked neighbourhood is returned.
+
+    Examples:
+        thought browse PERSON           # all known people
+        thought browse Acme             # everything connected to 'Acme'
+        thought browse desserts --depth 2
+    """
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        items = mem.browse_topic(
+            name, depth=depth, limit=limit,
+            scope=scope, owner_id=owner_id,  # type: ignore[arg-type]
+        )
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"items": items})
+        return
+    if not items:
+        err_console.print(f"[red]no matches for[/red] {name!r}")
+        raise typer.Exit(1)
+    table = Table(
+        title=f"Browsing [bold]{name}[/bold] ({items[0]['via']})",
+        border_style="cyan",
+    )
+    table.add_column("#", style="dim", width=3)
+    table.add_column("type", width=14)
+    table.add_column("entity")
+    table.add_column("score", justify="right")
+    for i, it in enumerate(items, 1):
+        score = it.get("score")
+        score_str = f"{score:.4f}" if isinstance(score, float) else "—"
+        table.add_row(str(i), str(it["type"]), str(it["name"]), score_str)
+    console.print(table)
+
+
+@app.command()
 def callers(
     name: str = typer.Argument(..., help="Function or method name."),
     limit: int = typer.Option(10),
@@ -1081,6 +1179,142 @@ def doctor() -> None:
             table.add_row(label, f"[dim]missing[/dim] — {hint}")
 
     console.print(table)
+
+
+# ---------------------------------------------------------------- hook subcommands
+
+@hook_app.command("recall")
+def hook_recall_cmd(
+    limit: int = typer.Option(5, help="Max hits to inject into context."),
+    scope: str = typer.Option("all"),
+    owner_id: str | None = typer.Option(None),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Auto-recall hook for Claude Code's UserPromptSubmit event.
+
+    Reads the hook payload (JSON) from stdin, runs `recall(query=prompt)`,
+    emits the result as additionalContext on stdout. Skips injection
+    silently when the recall is low-confidence — Claude Code expects the
+    hook to be a no-op in that case rather than emitting "no hits found".
+
+    Wire it up with:
+
+        thought hook install --recall
+
+    Or by hand in .claude/settings.json:
+
+        {"hooks": {"UserPromptSubmit": [
+          {"hooks": [{"type": "command", "command": "thought hook recall"}]}]}}
+    """
+    from .hooks.recall import cli_main
+    settings = load_settings(_resolve_config(config))
+    rc = cli_main(
+        db_path=settings.db_path,
+        limit=limit, scope=scope, owner_id=owner_id,
+        embedder_choice=settings.embedding.choice,
+        embedder_dim=settings.embedding.dim,
+    )
+    raise typer.Exit(rc)
+
+
+@hook_app.command("write")
+def hook_write_cmd(
+    mode: str = typer.Option(
+        "raw", "--mode",
+        help="'raw' ingests turns verbatim (cheap, Jaccard-dedup absorbs noise). "
+             "'extract' LLM-extracts durable facts first ($/turn, lower noise).",
+    ),
+    scope: str = typer.Option("private"),
+    owner_id: str | None = typer.Option(None),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Auto-write hook for Claude Code's Stop event.
+
+    Reads the hook payload (JSON) from stdin, picks the last user + assistant
+    turns out of the transcript, and ingests them. Idempotent via the
+    ingest pipeline's content-sha256 dedup, so replaying a transcript does
+    not double-ingest.
+
+    Wire it up with:
+
+        thought hook install --write          # default: --mode raw
+        thought hook install --both           # auto-recall + auto-write
+    """
+    from .hooks.write import cli_main
+    if mode not in {"raw", "extract"}:
+        err_console.print(f"[red]unknown mode[/red] {mode!r}")
+        raise typer.Exit(2)
+    settings = load_settings(_resolve_config(config))
+    rc = cli_main(
+        db_path=settings.db_path,
+        mode=mode,  # type: ignore[arg-type]
+        scope=scope, owner_id=owner_id,
+        embedder_choice=settings.embedding.choice,
+        embedder_dim=settings.embedding.dim,
+    )
+    raise typer.Exit(rc)
+
+
+@hook_app.command("install")
+def hook_install_cmd(
+    recall: bool = typer.Option(
+        False, "--recall", help="Install the UserPromptSubmit auto-recall hook.",
+    ),
+    write: bool = typer.Option(
+        False, "--write", help="Install the Stop auto-write hook.",
+    ),
+    both: bool = typer.Option(
+        False, "--both", help="Install both hooks (shorthand for --recall --write).",
+    ),
+    scope: str = typer.Option(
+        "project", help="'project' writes ./.claude/settings.json; 'user' writes ~/.claude/settings.json.",
+    ),
+) -> None:
+    """Register thought hooks in Claude Code's settings.json.
+
+    Idempotent — running twice is a no-op. Backs up the original to
+    settings.json.thought.bak before write.
+
+    Examples:
+        thought hook install --recall            # auto-recall only
+        thought hook install --both              # auto-recall + auto-write
+        thought hook install --both --scope user # global, all projects
+    """
+    from .hooks import install as hook_install
+    if scope not in {"project", "user"}:
+        err_console.print(f"[red]unknown scope[/red] {scope!r}")
+        raise typer.Exit(2)
+    kinds: list[hook_install.HookKind] = []
+    if both or recall:
+        kinds.append("recall")
+    if both or write:
+        kinds.append("write")
+    if not kinds:
+        err_console.print(
+            "[red]specify at least one of --recall / --write / --both[/red]"
+        )
+        raise typer.Exit(2)
+    results = hook_install.install_many(tuple(kinds), scope=scope)  # type: ignore[arg-type]
+    table = Table(
+        title=f"Hook install ({scope} scope)", border_style="cyan",
+    )
+    table.add_column("hook", style="bold")
+    table.add_column("status")
+    table.add_column("path")
+    for r in results:
+        style = {
+            "installed": "green",
+            "already_present": "yellow",
+            "error": "red",
+        }[r.status]
+        table.add_row(r.kind, f"[{style}]{r.status}[/{style}]", str(r.path))
+        if r.status == "error":
+            err_console.print(f"[red]error[/red] ({r.kind}): {r.detail}")
+    console.print(table)
+    console.print(
+        "[dim]restart Claude Code (or any client that reads settings.json) "
+        "to pick up the new hooks.[/dim]"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -7,6 +7,78 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] — 2026-05-15 — Auto-write + auto-recall + topic browsing
+
+### Added
+
+#### Auto-memory via Claude Code hooks
+- **`thought hook recall`** — `UserPromptSubmit` hook implementation. Reads
+  the hook payload from stdin, runs ``recall(query=prompt)``, emits the
+  result as ``additionalContext`` for Claude Code's next turn. Bounded
+  to 8k chars; gated on ``low_confidence`` so it stays silent when there's
+  nothing relevant. ~1-5 ms on a warm KB.
+- **`thought hook write`** — `Stop` hook implementation. Reads the session
+  transcript from the hook payload, picks the last user + last assistant
+  turn, ingests both via ``Memory.remember_many``. Idempotent on content
+  sha256 — replays don't double-write.
+  - **`--mode raw`** (default): cheap; the ingest pipeline's Jaccard dedup
+    + fact extractor absorb low-signal phrasing.
+  - **`--mode extract`**: LLM-extracts durable facts via Anthropic Haiku
+    before ingest. Costs ~$0.001/turn; falls back to ``raw`` with a stderr
+    warning when ``ANTHROPIC_API_KEY`` or the ``[llm-anthropic]`` extra is
+    missing.
+- **`thought hook install [--recall|--write|--both]`** — writes the hook
+  entries into ``.claude/settings.json`` (project-scoped by default, or
+  ``--scope user`` for global). Idempotent. Backs up the original to
+  ``settings.json.thought.bak`` before write.
+
+#### Topic browsing
+- **`thought topics`** + **`mcp__thought__list_topics`** — entity-type
+  aggregations with the top-access-count examples per type. Cheap (one
+  GROUP BY + one SELECT-LIMIT per type).
+- **`thought browse <name>`** + **`mcp__thought__browse_topic`** —
+  drill into a topic. Two-step resolution: name matches an entity type
+  (``PERSON``, ``function``, ``CONCEPT``…) → returns the top entities of
+  that type; otherwise treats ``name`` as an entity, resolves to an
+  anchor via canonical-name match, returns the PPR-ranked neighbourhood
+  (BFS fallback if PPR is empty).
+
+#### Backend
+- ``backend.count_by_type(scope_filter) → dict[str, int]`` (abstract method
+  on ``StorageBackend``; SQLite impl is one GROUP BY on the existing
+  ``e.type`` index).
+- ``backend.find_anchor_by_name(name, scope_filter) → Entity | None`` —
+  canonical-name-keyed anchor lookup ordered by access_count + importance.
+
+### Changed
+- ``Memory.list_topics`` + ``Memory.browse_topic`` facade methods.
+- ``unique_predicates`` defaults wired for auto-write so user-preference
+  facts (``PREFERS``, ``WORKS_AT``, ``OWNS``, ``REPORTS_TO``) auto-supersede
+  on conflict via the existing bi-temporal contradiction mechanism — the
+  Zep-style "temporal validity window" pattern.
+
+### Research informing the design
+The auto-memory design choices are grounded in 2024–2026 work on
+conversational memory: HippoRAG / HippoRAG 2 (PPR retrieval — already in
+use), Zep / Graphiti (temporal-validity contradiction handling), Mem0
+(every-turn retrieval + tool-result injection), A-Mem (agentic memory
+evolution — aspirational; deferred). The "skip aspirational
+episode→semantic consolidation in v0.3" decision is intentional: Larimar
+and A-Mem are research-grade, not production-ready, and the existing
+Ebbinghaus-decay consolidation engine is enough to keep auto-write noise
+from compounding.
+
+### Internal
+- 197 tests pass (was 150 at v0.2.2). 47 new tests across topic browsing,
+  hook subcommands, hook installer, transcript reader, turn picker, raw +
+  extract write modes, and the full ``write → recall`` integration loop.
+- New package ``src/thought/hooks/`` (``recall.py``, ``write.py``,
+  ``install.py``) — pure-Python, testable without subprocess.
+- Comparison harness re-run: 83.5% recall@10 (unchanged vs v0.2.2). No
+  regression from the new ingest paths.
+
+---
+
 ## [0.2.2] — 2026-05-14 — Critical: MCP stdio transport + Windows config + thread-safe SQLite
 
 ### Fixed
@@ -241,6 +313,7 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.3.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.3.0
 [0.2.2]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.2
 [0.2.1]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.1
 [0.2.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.0

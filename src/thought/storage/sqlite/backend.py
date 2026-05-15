@@ -313,6 +313,32 @@ class SQLiteBackend(StorageBackend):
         ).fetchall()
         return [self._row_to_entity(r) for r in rows]
 
+    def count_by_type(self, scope_filter: ScopeFilter) -> dict[str, int]:
+        where_sql, params = scope_filter.sql_where()
+        rows = self._conn.execute(
+            f"SELECT e.type AS t, COUNT(*) AS c FROM entities e "
+            f"WHERE {where_sql} AND e.valid_until IS NULL "
+            f"GROUP BY e.type ORDER BY c DESC",
+            params,
+        ).fetchall()
+        return {r["t"]: r["c"] for r in rows}
+
+    def find_anchor_by_name(
+        self, name: str, scope_filter: ScopeFilter,
+    ) -> Entity | None:
+        where_sql, params = scope_filter.sql_where()
+        canonical = _canon(name)
+        row = self._conn.execute(
+            f"SELECT e.* FROM entities e "
+            f"WHERE {where_sql} "
+            f"  AND e.valid_until IS NULL "
+            f"  AND e.canonical_name = ? "
+            f"ORDER BY e.access_count DESC, e.importance DESC, e.created_at ASC "
+            f"LIMIT 1",
+            [*params, canonical],
+        ).fetchone()
+        return self._row_to_entity(row) if row else None
+
     def find_code_entity(
         self,
         *,

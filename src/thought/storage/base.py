@@ -53,6 +53,26 @@ class StorageBackend(ABC):
     def list_entities(self, scope_filter: ScopeFilter) -> list[Entity]: ...
 
     @abstractmethod
+    def count_by_type(self, scope_filter: ScopeFilter) -> dict[str, int]:
+        """Return ``{type: count}`` of currently-valid entities in scope.
+
+        Powers ``thought topics`` / ``mcp__thought__list_topics``.
+        """
+        ...
+
+    @abstractmethod
+    def find_anchor_by_name(
+        self, name: str, scope_filter: ScopeFilter,
+    ) -> Entity | None:
+        """Look up a single anchor entity by name (canonical-matched).
+
+        Returns the highest-access-count entity matching the name within scope,
+        or ``None`` if no match. Used by ``browse_topic`` to resolve a string
+        topic into a graph seed.
+        """
+        ...
+
+    @abstractmethod
     def touch_access(self, entity_id: str) -> None: ...
 
     @abstractmethod

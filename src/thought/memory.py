@@ -213,6 +213,122 @@ class Memory:
         self._backend.touch_access_many(self._touch_queue)
         self._touch_queue.clear()
 
+    # ----------------------------------------------------- topic browsing
+
+    def list_topics(
+        self,
+        *,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+        min_count: int = 1,
+        examples_per_type: int = 3,
+    ) -> list[dict[str, object]]:
+        """Return entity-type aggregations + a small example list per type.
+
+        Powers ``thought topics`` / ``mcp__thought__list_topics``. Cheap —
+        one GROUP BY + one SELECT per type (capped at the ten most-populous
+        types so a runaway type doesn't dominate the query budget).
+        """
+        sf = ScopeFilter(scope=scope, owner_id=owner_id)
+        counts = self._backend.count_by_type(sf)
+        # Keep all types meeting min_count; ordered by count desc from the
+        # backend already. Limit example fetches to the top types.
+        topics: list[dict[str, object]] = []
+        for t, c in counts.items():
+            if c < min_count:
+                continue
+            where_sql, params = sf.sql_where()
+            rows = self._backend._conn.execute(  # type: ignore[attr-defined]
+                f"SELECT e.name FROM entities e WHERE {where_sql} "
+                f"AND e.valid_until IS NULL AND e.type = ? "
+                f"ORDER BY e.access_count DESC, e.importance DESC "
+                f"LIMIT ?",
+                [*params, t, examples_per_type],
+            ).fetchall()
+            topics.append({
+                "type": t,
+                "count": c,
+                "examples": [r["name"] for r in rows],
+            })
+        return topics
+
+    def browse_topic(
+        self,
+        name: str,
+        *,
+        depth: int = 1,
+        limit: int = 20,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Drill into a topic anchored at ``name``.
+
+        Two-step resolution:
+          1. If ``name`` matches a known entity-type (e.g. ``PERSON``,
+             ``function``), return the top-access-count entities of that type.
+          2. Otherwise treat ``name`` as an entity name, find the matching
+             anchor entity, and return its PPR-ranked neighbourhood. Falls
+             back to BFS-neighbours if PPR returns nothing meaningful.
+        """
+        sf = ScopeFilter(scope=scope, owner_id=owner_id)
+        # Case 1: literal type match (case-insensitive).
+        types = self._backend.count_by_type(sf)
+        type_key = next((k for k in types if k.lower() == name.lower()), None)
+        if type_key is not None:
+            where_sql, params = sf.sql_where()
+            rows = self._backend._conn.execute(  # type: ignore[attr-defined]
+                f"SELECT e.* FROM entities e WHERE {where_sql} "
+                f"AND e.valid_until IS NULL AND e.type = ? "
+                f"ORDER BY e.access_count DESC, e.importance DESC, e.created_at "
+                f"LIMIT ?",
+                [*params, type_key, limit],
+            ).fetchall()
+            return [
+                {
+                    "id": self._backend._row_to_entity(r).id,  # type: ignore[attr-defined]
+                    "name": r["name"],
+                    "type": r["type"],
+                    "score": None,
+                    "via": "type_facet",
+                }
+                for r in rows
+            ]
+
+        # Case 2: anchor-by-name → graph neighbourhood.
+        anchor = self._backend.find_anchor_by_name(name, sf)
+        if anchor is None:
+            return []
+
+        from .layers.graph import GraphLayer
+        gl = GraphLayer(self._backend)
+        # Try PPR for ranking; fall back to BFS if PPR is empty (e.g. an
+        # isolated anchor with no outgoing edges).
+        scores = gl.personalized_pagerank(seeds=[anchor.id], scope_filter=sf)
+        if scores:
+            ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:limit + 1]
+            results: list[dict[str, object]] = []
+            for eid, score in ranked:
+                if eid == anchor.id:
+                    continue
+                e = self._backend.get_entity(eid)
+                if e is None:
+                    continue
+                results.append({
+                    "id": e.id, "name": e.name, "type": e.type,
+                    "score": float(score), "via": "ppr",
+                })
+                if len(results) >= limit:
+                    break
+            if results:
+                return results
+        # Fallback: BFS neighbours.
+        neighbours = gl.neighbors(anchor.id, depth=depth, scope_filter=sf)
+        return [
+            {"id": n.id, "name": n.name, "type": n.type,
+             "score": None, "via": "bfs"}
+            for n in neighbours[:limit]
+        ]
+
     # ----------------------------------------------------- lifecycle
 
     def consolidate(self) -> int:

@@ -420,6 +420,120 @@ class SQLiteBackend(StorageBackend):
             for t in ("entities", "edges", "sources")
         }
 
+    # ---- v0.5 agent identity + scan log -----------------------------------
+
+    def upsert_agent(
+        self, *, name: str, description: str | None = None,
+        capabilities: list[str] | None = None,
+    ) -> str:
+        """Idempotent register-or-touch of a named agent. Returns the agent id."""
+        existing = self._conn.execute(
+            "SELECT id FROM agents WHERE name = ?", (name,),
+        ).fetchone()
+        now = _utc_iso(_now_utc())
+        if existing is not None:
+            self._conn.execute(
+                "UPDATE agents SET last_seen_at = ?, description = COALESCE(?, description), "
+                "capabilities = COALESCE(?, capabilities) WHERE id = ?",
+                (now, description, json.dumps(capabilities) if capabilities else None, existing["id"]),
+            )
+            return existing["id"]
+        agent_id = _new_id()
+        self._conn.execute(
+            "INSERT INTO agents (id, name, description, capabilities, created_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (agent_id, name, description,
+             json.dumps(capabilities) if capabilities else None, now, now),
+        )
+        return agent_id
+
+    def find_agent_by_name(self, name: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT id, name, description, capabilities, created_at, last_seen_at "
+            "FROM agents WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"], "name": row["name"], "description": row["description"],
+            "capabilities": json.loads(row["capabilities"]) if row["capabilities"] else [],
+            "created_at": row["created_at"], "last_seen_at": row["last_seen_at"],
+        }
+
+    def list_agents(self) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT id, name, description, capabilities, created_at, last_seen_at "
+            "FROM agents ORDER BY last_seen_at DESC NULLS LAST"
+        ).fetchall()
+        return [
+            {
+                "id": r["id"], "name": r["name"], "description": r["description"],
+                "capabilities": json.loads(r["capabilities"]) if r["capabilities"] else [],
+                "created_at": r["created_at"], "last_seen_at": r["last_seen_at"],
+            }
+            for r in rows
+        ]
+
+    def record_scan(
+        self, *,
+        agent_id: str | None,
+        repo_path: str,
+        since: str | None,
+        head_sha: str | None,
+        started_at: datetime,
+        finished_at: datetime,
+        files_scanned: int,
+        files_changed: int,
+        entities_added: int,
+        entities_retired: int,
+        edges_added: int,
+        edges_retired: int,
+        duration_ms: float,
+        note: str | None = None,
+    ) -> str:
+        scan_id = _new_id()
+        self._conn.execute(
+            "INSERT INTO scan_log (id, agent_id, started_at, finished_at, "
+            "repo_path, since, head_sha, files_scanned, files_changed, "
+            "entities_added, entities_retired, edges_added, edges_retired, "
+            "duration_ms, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (scan_id, agent_id,
+             _utc_iso(started_at), _utc_iso(finished_at),
+             repo_path, since, head_sha,
+             files_scanned, files_changed,
+             entities_added, entities_retired,
+             edges_added, edges_retired,
+             duration_ms, note),
+        )
+        return scan_id
+
+    def last_scan(self, *, agent_id: str | None, repo_path: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM scan_log "
+            "WHERE COALESCE(agent_id, '') = COALESCE(?, '') AND repo_path = ? "
+            "ORDER BY started_at DESC LIMIT 1",
+            (agent_id, repo_path),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_scans(
+        self, *, agent_id: str | None = None, limit: int = 10,
+    ) -> list[dict]:
+        if agent_id is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM scan_log WHERE agent_id = ? "
+                "ORDER BY started_at DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM scan_log ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     @classmethod
     def open_readonly(cls, path: str | Path) -> SQLiteBackend:
         """Open an existing SQLite file in read-only mode.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thought-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. A local MCP memory server with bi-temporal graph + vector + temporal layers, a query router, and a consolidation engine."
 readme = "README.md"
 license = "MIT"
@@ -61,6 +61,17 @@ code = [
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",
     "tree-sitter-typescript>=0.23",
+    # v0.5: required language coverage.
+    "tree-sitter-go>=0.23",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-php>=0.23",
+]
+embeddings-code = [
+    "sentence-transformers>=2.7",
+]
+adapters = [
+    "httpx>=0.27",
 ]
 git = ["pygit2>=1.15"]
 embeddings-local = ["sentence-transformers>=2.7"]

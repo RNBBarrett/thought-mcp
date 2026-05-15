@@ -7,6 +7,101 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] — 2026-05-15 — Agent substrate + multi-language code memory
+
+Pivot release: THOUGHT goes from *"Claude Code's memory tool"* to *"memory
+backend any agent loop can use."* Three feature pillars + a slew of deferred
+items called out at the bottom.
+
+### Added
+
+#### Agent identity + incremental scan
+- **`agents` table + `scan_log` table** (migration `0004_agents.sql`,
+  ``schema_version`` → 4). Entities + edges gain an optional ``agent_id``
+  column. Named agents claim provenance for the facts they write; the
+  scan_log gives each agent an automatic cursor so re-scans pick up where
+  the last left off.
+- **`thought scan <repo> [--as-agent NAME] [--since REF]`** — incremental
+  code-scan primitive. Walks the repo, ingests changed/new files via the
+  existing `CodeIngestPipeline`, records a row in `scan_log`, returns a
+  structured summary the agent can act on.
+- **`thought agent register/list/log`** — CLI for the agent identity model.
+- **`mcp__thought__working_context(target, role, budget_tokens)`** — the
+  universal *"what does my agent need to know right now"* primitive.
+  Returns a token-budgeted, PPR-ranked, role-aware payload covering the
+  anchor entity, top-K neighbours, recent contradictions, and any saved
+  view named after the role. **The single tool every adapter calls.**
+- **`mcp__thought__scan` / `scan_log_list` / `register_agent`** — MCP
+  surface for the same primitives.
+
+#### Multi-language code support
+- **4 new language extractors** alongside Python + TypeScript/JavaScript
+  from v0.2:
+  - **Go** (`go_extractor.py`) — modules, structs, methods (receiver-qualified
+    as `Cat.Meow`), interfaces, IMPORTS edges.
+  - **Rust** (`rust_extractor.py`) — modules, functions, structs/enums/traits
+    (as `class`-typed entities with `rust_kind` attr), impl blocks emit
+    DEFINES + INHERITS_FROM edges, `use` declarations.
+  - **Java** (`java_extractor.py`) — package modules, classes, interfaces,
+    enums, records, methods, constructors. Honours `extends` / `implements`
+    as INHERITS_FROM edges.
+  - **PHP** (`php_extractor.py`) — namespace modules, classes, interfaces,
+    traits, methods with visibility modifiers, `use` declarations.
+- **Shared extractor helpers** (`_common.py`) — text-of, visibility-of,
+  module-from-path, named-descendant walking.
+- **`detect_language` extended** to map `.go` / `.rs` / `.java` / `.php` →
+  the right extractor automatically.
+
+#### Agent-SDK adapter package
+- **`src/thought/adapters/claude_sdk.py`** — `ThoughtMemoryProvider` class:
+  drop-in memory adapter for any Claude-Agent-SDK-shaped agent. Three
+  methods cover the agent loop: `context_for(target, role)` returns a
+  working-context dict; `render_context(target)` returns the same payload
+  as a plain-text system-prompt augmentation; `record(content)` persists
+  what the agent learned; `scan(repo_path)` runs an incremental scan
+  under the agent's name.
+
+#### Codebase mapping
+- **`thought codebase-map [--budget-tokens N]`** — Aider-style top-N most
+  important symbols across the KB, ranked by HippoRAG-style Personalized
+  PageRank. The persistent equivalent of Aider's per-prompt repo map.
+
+### Changed
+- `pyproject.toml` `[code]` extra gains `tree-sitter-go`, `tree-sitter-rust`,
+  `tree-sitter-java`, `tree-sitter-php`.
+- New `[embeddings-code]` extra (reserved for the v0.5.1 jina-code embedder
+  work).
+- New `[adapters]` extra (currently just `httpx>=0.27` for the SDK
+  adapters).
+
+### Internal
+- 320 tests pass (was 295 at v0.4.0). +25 across the new extractors,
+  agent identity, scan, working_context, codebase-map CLI, and the
+  Claude SDK adapter round-trip.
+- Comparison harness re-run: 83.5% recall@10 (unchanged vs v0.4.0).
+
+### Honest defers — what didn't ship in v0.5.0 but is in the v0.5 plan
+
+The approved plan covered ~22 days of work spanning four verticals; this
+release ships the most-leveraged ~30% in one focused session. Coming in
+follow-on releases:
+
+- **v0.5.1**: Function-body semantic embeddings via jina-embeddings-v2-base-code
+  + `mcp__thought__find_similar_code`; LangChain / AutoGen / Pydantic AI /
+  CrewAI / Letta adapter shims (only Claude SDK adapter shipped in 0.5.0);
+  runnable `examples/vuln_scanner/` reference agent.
+- **v0.6**: Writing vertical — `thought ingest-prose`, fiction + academic
+  entity taxonomies, continuity-check / outline / citations / timeline
+  commands.
+- **v0.7**: Investigations vertical — `thought ingest-legal` / `ingest-osint`
+  / `ingest-compliance` / `ingest-forensic` with the matching entity/edge
+  taxonomies, plus deposition-analyzer + osint-aggregator reference agents.
+- **v0.8**: Platform features — `thought graph` TUI, `memory-diff`,
+  `bench` (LongMemEval), `publish-view`, federated sync, cryptographic
+  attestations.
+
+---
+
 ## [0.4.0] — 2026-05-15 — DB lifecycle + Local LLMs + Cypher + Ask
 
 A big release. Four feature areas combine to make THOUGHT a complete local-AI
@@ -421,6 +516,7 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.5.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.3.0
 [0.2.2]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.2.2

@@ -23,7 +23,30 @@
 
 ---
 
-## ✨ New in v0.4 — Lifecycle commands + Local LLMs + Cypher + Ask
+## ✨ New in v0.5 — Agent substrate + multi-language code memory
+
+THOUGHT pivots from *"Claude Code's memory tool"* to *"memory backend any agent loop can use."* Three new headlines:
+
+1. **Universal `working_context` MCP tool** — any agent (Claude Agent SDK, LangGraph, AutoGen, custom workflows) calls `mcp__thought__working_context(target="function:authenticate", role="vuln-scanner", budget_tokens=2000)` and gets back a token-budgeted, PPR-ranked, role-aware payload. The single primitive that flips THOUGHT from "Claude Code add-on" to "agent-memory backend."
+2. **`thought scan <repo>` — incremental codebase mapping for agents.** Call it weekly, on every commit, on every CI run. THOUGHT diffs against the last scan via the new `scan_log` table and ingests only what changed. Pair with `--as-agent vuln-scanner` to record provenance per agent. **Six languages supported**: Python, JavaScript/TypeScript, Go, Rust, Java, PHP — all via tree-sitter.
+3. **Named agent identity model** — `agents` table + optional `agent_id` on every entity/edge. Lets you ask *"what did the vuln-scanner agent learn about this repo that the writing-assistant didn't?"* CLI: `thought agent register/list/log`. Adapters provided for the Claude Agent SDK (`from thought.adapters.claude_sdk import ThoughtMemoryProvider`).
+
+Plus `thought codebase-map` — Aider-style top-N most important symbols across the whole KB, persisted across sessions.
+
+```bash
+# Code-scanning agent in 5 lines:
+from thought.adapters.claude_sdk import ThoughtMemoryProvider
+with ThoughtMemoryProvider(agent="vuln-scanner") as mem:
+    mem.scan("./repo")                                  # incremental
+    ctx = mem.context_for("function:authenticate")      # PPR-ranked context
+    mem.record("CVE-pattern X in authenticate at line 42")
+```
+
+See [CHANGELOG.md](CHANGELOG.md#050--2026-05-15--agent-substrate--multi-language-code-memory) for the full v0.5 list including honest defers (function-body embeddings, more SDK adapters, writing vertical, investigations vertical all come in follow-on releases).
+
+---
+
+## ✨ Previously in v0.4 — Lifecycle commands + Local LLMs + Cypher + Ask
 
 Four headline capabilities:
 
@@ -120,6 +143,81 @@ What's new:
 - **5 new CLI commands**: `ingest-code`, `ingest-git`, `callers`, `impact`, `diff`.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full v0.2 list. The v0.1 horizontal-memory surface below is unchanged — v0.2 is purely additive.
+
+---
+
+## Who is this for? (Pick your archetype)
+
+THOUGHT serves several distinct audiences. Pick the one that matches and you'll find a 3-command quickstart that gets you to a working setup.
+
+### 🤖 The agent developer (Claude Agent SDK / LangGraph / AutoGen / custom)
+
+You're building an agent loop that needs persistent memory across runs. Today you either lose state between invocations or hand-roll a vector DB.
+
+```python
+from thought.adapters.claude_sdk import ThoughtMemoryProvider
+with ThoughtMemoryProvider(agent="my-agent", db_path=".thought/agent.db") as mem:
+    mem.scan("./repo")                                  # idempotent incremental scan
+    ctx = mem.context_for("function:authenticate")      # PPR-ranked context for next LLM turn
+    mem.record("CVE pattern X found at file:42")        # persist what the agent learned
+```
+
+What you get: bi-temporal entities, typed-edge graph, HippoRAG PageRank retrieval, contradiction detection — all the things you'd otherwise spend months building.
+
+### 🛡️ The vulnerability-scanner / security agent author
+
+You scan codebases for security issues and need to *accumulate* findings across runs without re-flagging the same issue.
+
+```bash
+thought agent register vuln-scanner --description "CVE pattern matcher"
+thought scan ./target-repo --as-agent vuln-scanner       # initial map
+# ... your agent does its analysis, calling `record` per finding ...
+thought scan ./target-repo --as-agent vuln-scanner       # next week: only new files
+```
+
+The `scan_log` table tracks every run; PPR over the call graph ranks impact (which functions are most-connected to a vulnerable one); contradiction detection surfaces when a previously-flagged issue gets remediated.
+
+### 👩‍💻 The polyglot developer
+
+You work in a multi-language monorepo and want an agent that understands the whole codebase, not just one language.
+
+```bash
+thought ingest-code ./my-monorepo --lang auto             # picks Python / TS / Go / Rust / Java / PHP per file
+thought callers authenticate_user                          # cross-file caller traversal
+thought codebase-map --budget-tokens 2000                  # top symbols by PageRank
+thought query "MATCH (f:function)-[:CALLS]->(g:function) RETURN f.name, g.name LIMIT 20"
+```
+
+v0.5 covers Python, JavaScript/TypeScript, Go, Rust, Java, PHP. Cross-package symbol resolution is intra-package only today; cross-package + Stack Graphs lands in v0.6.
+
+### 🧠 The Claude Code user
+
+You use Claude Code daily and want it to remember context across sessions automatically.
+
+```bash
+thought hook install --both                # auto-recall + auto-write hooks
+# Restart Claude Code. From here on, every prompt pre-recalls relevant facts,
+# every assistant turn auto-ingests the transcript.
+```
+
+See "Auto-memory: capture + recall without thinking about it" below for the full mechanic + the day-1 onboarding tip.
+
+### 🏠 The local-LLM enthusiast (Ollama / LM Studio)
+
+You don't want API keys; you want fully-local memory.
+
+```bash
+ollama serve && ollama pull nomic-embed-text
+thought ollama-setup --write              # auto-writes thought.toml
+thought ingest "Alice owns Acme."
+thought recall "alice"
+```
+
+Detailed step-by-step walkthroughs for Ollama / LM Studio / any-OpenAI-compatible-server below.
+
+### 🔍 Coming in v0.6+: writers, journalists, lawyers, investigators
+
+The v0.5 plan documents future verticals — writing (novelists / academics), legal / OSINT / compliance / forensic — sharing the same bi-temporal + typed-edge + contradiction-detection substrate. See the [v0.5+ plan](https://github.com/RNBBarrett/thought-mcp/blob/main/CHANGELOG.md) for the roadmap.
 
 ---
 

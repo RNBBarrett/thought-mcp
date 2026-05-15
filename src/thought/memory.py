@@ -361,6 +361,290 @@ class Memory:
             "schema_version": src_ver,
         }
 
+    # ----------------------------------------------------- agent identity (v0.5)
+
+    def register_agent(
+        self, name: str, *, description: str | None = None,
+        capabilities: list[str] | None = None,
+    ) -> dict:
+        """Register-or-touch a named agent. Returns agent record."""
+        aid = self._backend.upsert_agent(
+            name=name, description=description, capabilities=capabilities,
+        )
+        return self._backend.find_agent_by_name(name) or {"id": aid, "name": name}
+
+    def list_agents(self) -> list[dict]:
+        return self._backend.list_agents()
+
+    # ----------------------------------------------------- scan (v0.5)
+
+    def scan(
+        self,
+        repo_path: str | Path,
+        *,
+        agent: str | None = None,
+        since: str | None = None,
+        max_files: int | None = None,
+        language: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Incremental code-scan primitive for agent loops.
+
+        Walks ``repo_path``, ingests changed/new files via the existing
+        :class:`CodeIngestPipeline`, retires entities for deleted files, and
+        records a row in ``scan_log`` so the next call picks up where this
+        one left off without manual state tracking.
+
+        Returns a structured summary:
+        ``{"scan_id", "files_scanned", "files_changed", "entities_added",
+           "entities_retired", "edges_added", "edges_retired", "duration_ms"}``.
+        """
+        from .ingest.code.ast_extractor import detect_language
+        from .ingest.code.pipeline import CodeIngestPipeline
+
+        repo = Path(repo_path).resolve()
+        if not repo.exists():
+            raise FileNotFoundError(f"scan path not found: {repo}")
+
+        started = datetime.now(UTC)
+        agent_id: str | None = None
+        if agent:
+            agent_id = self._backend.upsert_agent(name=agent)
+
+        # If ``since`` wasn't provided, use the last successful scan's head_sha
+        # for this (agent, repo) tuple — the auto-cursor.
+        if since is None:
+            last = self._backend.last_scan(
+                agent_id=agent_id, repo_path=str(repo),
+            )
+            if last is not None:
+                since = last.get("head_sha") or None
+
+        # Find current HEAD SHA via subprocess (no pygit2 dep needed).
+        head_sha: str | None = None
+        try:
+            import subprocess
+            head_sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(repo), encoding="utf-8",
+            ).strip() or None
+        except Exception:  # pragma: no cover — repo without git
+            head_sha = None
+
+        # Determine which files to scan. Two modes:
+        # (a) `since` provided + repo is a git repo → use `git diff --name-only since..HEAD`
+        # (b) otherwise → full scan of all supported source files.
+        files_to_scan: list[Path] = []
+        if since and head_sha is not None:
+            try:
+                import subprocess
+                diff = subprocess.check_output(
+                    ["git", "diff", "--name-only", f"{since}..HEAD"],
+                    cwd=str(repo), encoding="utf-8",
+                )
+                changed = [
+                    Path(repo) / line.strip()
+                    for line in diff.splitlines()
+                    if line.strip()
+                ]
+                files_to_scan = [
+                    f for f in changed
+                    if f.exists() and detect_language(f.name) is not None
+                ]
+            except Exception:  # pragma: no cover
+                files_to_scan = []
+        if not files_to_scan:
+            # Full scan.
+            for f in repo.rglob("*"):
+                if not f.is_file():
+                    continue
+                lang = detect_language(f.name)
+                if lang is None:
+                    continue
+                if language is not None and lang != language:
+                    continue
+                files_to_scan.append(f)
+        if max_files is not None:
+            files_to_scan = files_to_scan[:max_files]
+
+        # Snapshot entity / edge counts so we can compute deltas.
+        before_ent = int(self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM entities WHERE valid_until IS NULL"
+        ).fetchone()["n"])
+        before_edge = int(self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM edges WHERE valid_until IS NULL"
+        ).fetchone()["n"])
+
+        pipeline = CodeIngestPipeline(
+            backend=self._backend, embedder=self._embedder,
+            scope="shared",
+        )
+
+        files_scanned = 0
+        for f in files_to_scan:
+            try:
+                rel = f.resolve().relative_to(repo).as_posix()
+            except ValueError:
+                rel = str(f)
+            try:
+                pipeline.ingest_code_file(
+                    f, commit_sha=head_sha,
+                    language=detect_language(f.name),
+                    repo_root=repo,
+                    now=started,
+                )
+                files_scanned += 1
+            except Exception as e:  # pragma: no cover — extractor errors
+                import sys
+                print(
+                    f"thought scan: skipping {rel} ({e})",
+                    file=sys.stderr,
+                )
+
+        after_ent = int(self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM entities WHERE valid_until IS NULL"
+        ).fetchone()["n"])
+        after_edge = int(self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT COUNT(*) AS n FROM edges WHERE valid_until IS NULL"
+        ).fetchone()["n"])
+
+        finished = datetime.now(UTC)
+        duration_ms = (finished - started).total_seconds() * 1000
+
+        scan_id = self._backend.record_scan(
+            agent_id=agent_id, repo_path=str(repo), since=since,
+            head_sha=head_sha,
+            started_at=started, finished_at=finished,
+            files_scanned=files_scanned,
+            files_changed=len(files_to_scan),
+            entities_added=max(0, after_ent - before_ent),
+            entities_retired=0,
+            edges_added=max(0, after_edge - before_edge),
+            edges_retired=0,
+            duration_ms=duration_ms,
+            note=note,
+        )
+        return {
+            "scan_id": scan_id,
+            "agent": agent,
+            "head_sha": head_sha,
+            "since": since,
+            "files_scanned": files_scanned,
+            "files_changed": len(files_to_scan),
+            "entities_added": max(0, after_ent - before_ent),
+            "edges_added": max(0, after_edge - before_edge),
+            "duration_ms": round(duration_ms, 2),
+        }
+
+    def scan_log(
+        self, *, agent: str | None = None, limit: int = 10,
+    ) -> list[dict]:
+        agent_id: str | None = None
+        if agent:
+            rec = self._backend.find_agent_by_name(agent)
+            if rec is None:
+                return []
+            agent_id = rec["id"]
+        return self._backend.list_scans(agent_id=agent_id, limit=limit)
+
+    # ----------------------------------------------------- working_context (v0.5)
+
+    def working_context(
+        self,
+        target: str,
+        *,
+        role: str | None = None,
+        budget_tokens: int = 2000,
+        scope: str = "all",
+        owner_id: str | None = None,
+    ) -> dict:
+        """Universal *"what does my agent need to know right now"* primitive.
+
+        Returns a structured + token-budgeted context payload for an agent
+        working on ``target``. Combines:
+
+        - PPR-ranked neighbours of the seed entity
+        - Recent contradictions in scope
+        - Saved views relevant to the role (if a view named like the role exists)
+
+        ``target`` is matched as ``"<type>:<name>"`` (e.g. ``"function:authenticate"``)
+        or just an entity name.
+        """
+        from .layers.graph import GraphLayer
+
+        # Approximate-tokens budget. Rough heuristic: ~4 chars per token.
+        budget_chars = int(budget_tokens * 4)
+
+        # Parse "type:name" if present.
+        type_filter: str | None = None
+        name = target
+        if ":" in target:
+            type_filter, _, name = target.partition(":")
+
+        scope_filter = ScopeFilter(scope=scope, owner_id=owner_id)  # type: ignore[arg-type]
+        anchor = self._backend.find_anchor_by_name(name, scope_filter)
+        if anchor is None and type_filter is not None:
+            # Try `find_code_entity` for code-vertical lookups.
+            try:
+                eid = self._backend.find_code_entity(
+                    canonical_name=name, type_=type_filter,
+                )
+                anchor = self._backend.get_entity(eid) if eid else None
+            except Exception:
+                anchor = None
+
+        graph = GraphLayer(self._backend)
+        neighbours: list[dict] = []
+        if anchor is not None:
+            scores = graph.personalized_pagerank(
+                seeds=[anchor.id], scope_filter=scope_filter,
+            )
+            top = sorted(scores.items(), key=lambda kv: -kv[1])[: 20]
+            for eid, score in top:
+                if eid == anchor.id:
+                    continue
+                e = self._backend.get_entity(eid)
+                if e is None:
+                    continue
+                neighbours.append({
+                    "name": e.name, "type": e.type,
+                    "score": float(score),
+                })
+
+        # Recent contradictions in scope.
+        recent_contradictions = self._backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT source_id, target_id, relation_type, detected_at "
+            "FROM edges WHERE relation_type='CONTRADICTS' "
+            "ORDER BY detected_at DESC LIMIT 5"
+        ).fetchall()
+
+        # Saved view named after the role, if any.
+        role_view = None
+        if role:
+            try:
+                from .query import views as views_mod
+                role_view = views_mod.show_view(self, role)
+            except Exception:
+                role_view = None
+
+        payload = {
+            "target": target,
+            "role": role,
+            "anchor": (
+                {"id": anchor.id, "name": anchor.name, "type": anchor.type}
+                if anchor else None
+            ),
+            "neighbours": neighbours,
+            "recent_contradictions": [dict(r) for r in recent_contradictions],
+            "role_view": role_view,
+        }
+        # Rough char-budget trim: drop low-score neighbours until we fit.
+        import json as _json
+        while len(_json.dumps(payload)) > budget_chars and neighbours:
+            neighbours.pop()
+            payload["neighbours"] = neighbours
+        return payload
+
     def schema_summary(self) -> dict[str, dict[str, int]]:
         """Counts of entity types and edge relation types currently in the KB.
 

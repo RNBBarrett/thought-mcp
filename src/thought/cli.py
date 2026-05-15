@@ -1221,6 +1221,219 @@ def ask_cmd(
         console.print(f"[dim]saved as view '{save_as}'[/dim]")
 
 
+@app.command()
+def scan(
+    repo_path: Path = typer.Argument(Path("."), help="Path to a code repo to scan."),
+    agent: str | None = typer.Option(
+        None, "--as-agent",
+        help="Agent name to record provenance under (e.g. 'vuln-scanner').",
+    ),
+    since: str | None = typer.Option(
+        None, "--since",
+        help="Only scan files changed since this git ref / sha / date.",
+    ),
+    max_files: int | None = typer.Option(
+        None, "--max-files", help="Cap on the number of files this scan ingests.",
+    ),
+    language: str | None = typer.Option(
+        None, "--language", "-l",
+        help="Restrict scan to one language (python / typescript / go / rust / java / php).",
+    ),
+    note: str | None = typer.Option(None, "--note", help="Free-form note for the scan log."),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Incremental code-scan primitive for agent loops.
+
+    Walks ``repo_path``, ingests new/changed files, records a scan_log
+    row so the next invocation picks up where this one left off.
+
+    Examples:
+        thought scan .                            # full first-time scan
+        thought scan . --as-agent vuln-scanner    # under a named agent
+        thought scan . --since v0.4.0             # only files changed since the tag
+    """
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        try:
+            result = mem.scan(
+                repo_path, agent=agent, since=since,
+                max_files=max_files, language=language, note=note,
+            )
+        except FileNotFoundError as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1) from e
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data=result)
+        return
+    table = Table(title="Scan summary", show_header=False, border_style="cyan")
+    table.add_column(style="bold")
+    table.add_column(justify="right")
+    for k, v in result.items():
+        if k == "scan_id":
+            continue
+        table.add_row(k, str(v))
+    console.print(table)
+    console.print(f"[dim]scan_id: {result['scan_id']}[/dim]")
+
+
+agent_app = typer.Typer(name="agent", help="Manage named agents (provenance).")
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.command("register")
+def agent_register_cmd(
+    name: str = typer.Argument(...),
+    description: str | None = typer.Option(None, "--description", "-d"),
+    capability: list[str] | None = typer.Option(
+        None, "--cap", help="Declared capability (can repeat).",
+    ),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Register-or-touch a named agent."""
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        rec = mem.register_agent(
+            name, description=description, capabilities=capability,
+        )
+    finally:
+        mem.close()
+    console.print_json(data=rec)
+
+
+@agent_app.command("list")
+def agent_list_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        agents = mem.list_agents()
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"agents": agents})
+        return
+    if not agents:
+        console.print("[dim]no agents registered yet.[/dim]")
+        return
+    t = Table(title="Agents", border_style="cyan")
+    t.add_column("name", style="bold")
+    t.add_column("description")
+    t.add_column("capabilities")
+    t.add_column("last seen")
+    for a in agents:
+        t.add_row(
+            a["name"], a.get("description") or "",
+            ", ".join(a.get("capabilities") or []),
+            a.get("last_seen_at") or "",
+        )
+    console.print(t)
+
+
+@agent_app.command("log")
+def agent_log_cmd(
+    name: str | None = typer.Argument(None),
+    limit: int = typer.Option(10),
+    json_out: bool = typer.Option(False, "--json"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Show recent scan-log entries (optionally for one agent)."""
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        scans = mem.scan_log(agent=name, limit=limit)
+    finally:
+        mem.close()
+    if json_out:
+        console.print_json(data={"scans": scans})
+        return
+    if not scans:
+        console.print("[dim]no scans recorded.[/dim]")
+        return
+    t = Table(title=f"Scan log{' for ' + name if name else ''}", border_style="cyan")
+    t.add_column("started")
+    t.add_column("repo")
+    t.add_column("files")
+    t.add_column("ents+", justify="right")
+    t.add_column("edges+", justify="right")
+    t.add_column("ms", justify="right")
+    for s in scans:
+        t.add_row(
+            str(s.get("started_at", ""))[:19],
+            str(s.get("repo_path", ""))[-40:],
+            str(s.get("files_scanned", 0)),
+            str(s.get("entities_added", 0)),
+            str(s.get("edges_added", 0)),
+            f"{s.get('duration_ms', 0):.0f}",
+        )
+    console.print(t)
+
+
+@app.command("codebase-map")
+def codebase_map_cmd(
+    budget_tokens: int = typer.Option(2000, "--budget-tokens"),
+    config: Path = typer.Option(Path("thought.toml")),
+) -> None:
+    """Aider-style top-N symbols across the KB, ranked by PPR.
+
+    Useful as a code-context primer for agents working over a large repo.
+    """
+    from .layers.graph import GraphLayer
+    from .models import ScopeFilter
+    settings = load_settings(_resolve_config(config))
+    mem = _open_memory(settings)
+    try:
+        backend = mem._backend
+        sf = ScopeFilter(scope="all")
+        all_ids = backend.list_entity_ids(sf)
+        if not all_ids:
+            console.print("[dim]KB is empty.[/dim]")
+            return
+        # Seed PPR from every code-type entity → returns global importance.
+        graph = GraphLayer(backend)
+        rows = backend._conn.execute(  # type: ignore[attr-defined]
+            "SELECT id FROM entities WHERE valid_until IS NULL "
+            "AND type IN ('function', 'method', 'class', 'module')"
+        ).fetchall()
+        seeds = [r["id"] for r in rows]
+        if not seeds:
+            console.print("[dim]no code entities — run `thought scan` first.[/dim]")
+            return
+        scores = graph.personalized_pagerank(seeds=seeds, scope_filter=sf)
+        # Pick the top symbols up to a rough token budget (4 chars ≈ 1 token).
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        out_rows = []
+        char_budget = budget_tokens * 4
+        chars = 0
+        for eid, score in ranked:
+            e = backend.get_entity(eid)
+            if e is None or e.type not in {"function", "method", "class", "module"}:
+                continue
+            row = {"name": e.name, "type": e.type, "score": round(score, 5)}
+            row_chars = len(str(row))
+            if chars + row_chars > char_budget:
+                break
+            chars += row_chars
+            out_rows.append(row)
+    finally:
+        mem.close()
+
+    t = Table(title=f"Codebase map (budget ≈ {budget_tokens} tokens)", border_style="cyan")
+    t.add_column("#", style="dim", width=4)
+    t.add_column("score", justify="right")
+    t.add_column("type", width=10)
+    t.add_column("name")
+    for i, r in enumerate(out_rows, 1):
+        t.add_row(str(i), f"{r['score']:.4f}", str(r["type"]), str(r["name"]))
+    console.print(t)
+
+
 @app.command("ollama-setup")
 def ollama_setup_cmd(
     host: str = typer.Option(

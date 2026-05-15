@@ -177,6 +177,68 @@ def build_app(memory: Memory):
         return await asyncio.to_thread(_do)
 
     @app.tool()
+    async def working_context(
+        target: str,
+        role: str | None = None,
+        budget_tokens: int = 2000,
+        scope: Literal["shared", "private", "all"] = "all",
+        owner_id: str | None = None,
+    ) -> dict:
+        """Universal *"what does my agent need to know about X right now"* primitive.
+
+        ``target`` can be ``"function:authenticate"`` / ``"chapter:5"`` / a plain entity name.
+        Returns ``{"anchor", "neighbours", "recent_contradictions", "role_view"}``
+        token-budgeted to ``budget_tokens``.
+        """
+        def _do() -> dict:
+            return memory.working_context(
+                target, role=role, budget_tokens=budget_tokens,
+                scope=scope, owner_id=owner_id,
+            )
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def scan(
+        repo_path: str,
+        agent: str | None = None,
+        since: str | None = None,
+        max_files: int | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Incremental code-scan primitive. Walks ``repo_path``, ingests
+        changed/new files, records a row in ``scan_log`` so the next call
+        picks up where this one left off.
+        """
+        def _do() -> dict:
+            return memory.scan(
+                repo_path, agent=agent, since=since,
+                max_files=max_files, note=note,
+            )
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def scan_log_list(
+        agent: str | None = None, limit: int = 10,
+    ) -> dict:
+        """List the last N scan runs (optionally filtered by agent name)."""
+        def _do() -> dict:
+            return {"scans": memory.scan_log(agent=agent, limit=limit)}
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
+    async def register_agent(
+        name: str,
+        description: str | None = None,
+        capabilities: list[str] | None = None,
+    ) -> dict:
+        """First-time setup for a named agent (vuln-scanner / writer / etc.)."""
+        def _do() -> dict:
+            return memory.register_agent(
+                name, description=description, capabilities=capabilities,
+            )
+        return await asyncio.to_thread(_do)
+
+    @app.tool()
     async def view_delete(name: str) -> dict:
         """Delete a saved view."""
         from .query import views

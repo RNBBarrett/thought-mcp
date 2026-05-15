@@ -30,10 +30,34 @@ def _typescript_extractor():  # pragma: no cover — wired in Phase 5
     return typescript_extractor.extract
 
 
+def _go_extractor():
+    from . import go_extractor
+    return go_extractor.extract
+
+
+def _rust_extractor():
+    from . import rust_extractor
+    return rust_extractor.extract
+
+
+def _java_extractor():
+    from . import java_extractor
+    return java_extractor.extract
+
+
+def _php_extractor():
+    from . import php_extractor
+    return php_extractor.extract
+
+
 _LOADERS = {
     "python": _python_extractor,
     "typescript": _typescript_extractor,
     "javascript": _typescript_extractor,  # same grammar package, different mode
+    "go":         _go_extractor,
+    "rust":       _rust_extractor,
+    "java":       _java_extractor,
+    "php":        _php_extractor,
 }
 
 
@@ -70,4 +94,12 @@ def detect_language(file_path: str) -> str | None:
         return "typescript"
     if p.endswith((".js", ".jsx", ".mjs", ".cjs")):
         return "javascript"
+    if p.endswith(".go"):
+        return "go"
+    if p.endswith(".rs"):
+        return "rust"
+    if p.endswith(".java"):
+        return "java"
+    if p.endswith(".php"):
+        return "php"
     return None

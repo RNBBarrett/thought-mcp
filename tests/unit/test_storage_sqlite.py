@@ -42,8 +42,8 @@ def test_migrate_creates_all_tables(backend: SQLiteBackend) -> None:
 
 
 def test_schema_version_is_recorded(backend: SQLiteBackend) -> None:
-    # v0.4 migration adds saved_views and bumps schema_version to 3.
-    assert backend.schema_version() == 3
+    # v0.5 migration adds agents + scan_log and bumps schema_version to 4.
+    assert backend.schema_version() == 4
 
 
 def test_upsert_source_dedupes_by_hash(backend: SQLiteBackend) -> None:

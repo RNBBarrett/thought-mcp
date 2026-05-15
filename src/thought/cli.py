@@ -64,6 +64,11 @@ view_app = typer.Typer(
     help="Saved Cypher views — named queries that derive new constructs.",
 )
 app.add_typer(view_app, name="view")
+demo_app = typer.Typer(
+    name="demo",
+    help="Built-in dogfood / smoke / first-confidence-check runner.",
+)
+app.add_typer(demo_app, name="demo")
 console = Console(stderr=False)
 err_console = Console(stderr=True)
 
@@ -920,6 +925,96 @@ def ingest_git_cmd(
         console.print(table)
     finally:
         mem.close()
+
+
+@demo_app.command("run")
+def demo_run_cmd(
+    kind: str = typer.Option(
+        "code", "--kind", "-k",
+        help="Audience: code | writer | legal | researcher | all.",
+    ),
+    keep: bool = typer.Option(
+        False, "--keep",
+        help="Leave the scratch DB on disk for inspection (default: cleanup on exit).",
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run the built-in dogfood walkthrough for one audience (or all).
+
+    Audiences:
+        code        — the 14-stage code/agent flow (default)
+        writer      — novelist / paper-author continuity demo
+        legal       — investigator witness-contradiction demo
+        researcher  — academic claim/citation-network demo
+        all         — every audience above, sequentially
+
+    Each audience runs in a self-cleaning tmp dir; your real KB is untouched.
+
+    Examples:
+        thought demo run
+        thought demo run --kind writer
+        thought demo run --kind all
+        thought demo run --kind code --keep    # inspect scratch DB after
+    """
+    from .demo import run_demo
+    if kind not in {"code", "writer", "legal", "researcher", "all"}:
+        err_console.print(
+            f"[red]unknown --kind[/red] {kind!r} "
+            "(choose code | writer | legal | researcher | all)"
+        )
+        raise typer.Exit(2)
+    report = run_demo(kind=kind, keep=keep)  # type: ignore[arg-type]
+    if json_out:
+        console.print_json(data={
+            "version": report.version,
+            "workspace": report.workspace,
+            "all_passed": report.all_passed,
+            "total_ms": round(report.total_ms, 2),
+            "cleaned_up": report.cleaned_up,
+            "stages": [
+                {
+                    "audience": s.audience, "name": s.name,
+                    "passed": s.passed, "duration_ms": round(s.duration_ms, 2),
+                    "note": s.note, "error": s.error,
+                }
+                for s in report.stages
+            ],
+        })
+        raise typer.Exit(0 if report.all_passed else 1)
+    table = Table(
+        title=f"thought demo run (kind={kind}, version={report.version})",
+        border_style="cyan",
+    )
+    table.add_column("audience", style="bold")
+    table.add_column("stage")
+    table.add_column("status")
+    table.add_column("ms", justify="right")
+    table.add_column("note")
+    for s in report.stages:
+        status = "[green]PASS[/green]" if s.passed else "[red]FAIL[/red]"
+        table.add_row(
+            s.audience, s.name, status,
+            f"{s.duration_ms:.0f}", s.note or s.error,
+        )
+    console.print(table)
+    summary = (
+        f"[bold]{'all passed' if report.all_passed else 'some failures'}[/bold]   "
+        f"total {report.total_ms:.0f} ms   "
+        f"workspace {'cleaned up' if report.cleaned_up else 'kept at ' + report.workspace}"
+    )
+    console.print(summary)
+    raise typer.Exit(0 if report.all_passed else 1)
+
+
+@demo_app.command("cleanup")
+def demo_cleanup_cmd() -> None:
+    """Remove any leftover ``thought-demo-*`` scratch directories.
+
+    Useful if you ran with ``--keep`` previously or interrupted a run mid-way.
+    """
+    from .demo import cleanup_demo_workspaces
+    n = cleanup_demo_workspaces()
+    console.print(f"  [green][ok][/green] removed {n} leftover scratch dir(s)")
 
 
 @app.command()

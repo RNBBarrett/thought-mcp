@@ -146,6 +146,32 @@ See [CHANGELOG.md](CHANGELOG.md) for the full v0.2 list. The v0.1 horizontal-mem
 
 ---
 
+## Test your install in 5 seconds
+
+```bash
+thought demo run                    # default: code/agent flow (14 stages)
+thought demo run --kind writer      # novel / paper continuity demo
+thought demo run --kind legal       # witness contradiction demo
+thought demo run --kind researcher  # claim / citation network demo
+thought demo run --kind all         # every audience above
+thought demo cleanup                # tidy up any leftover scratch dirs
+```
+
+Every run uses a self-cleaning temp DB — your real KB is never touched. The runner reports pass/fail + duration per stage in a table; pass `--json` for scripted output. Pass `--keep` to inspect the scratch workspace afterward.
+
+What each audience demonstrates (using only the v0.5 surface — no v0.6+ extractors required):
+
+| Audience | Stages | Highlights |
+|---|---|---|
+| **code** | 14 | end-to-end agent flow: scan + working_context + 6-lang extractors + Claude SDK adapter |
+| **writer** | 6 | character traits across chapters, time-travel `as_of` recall, contradiction surfacing |
+| **legal** | 6 | witness statements with `unique_predicates`, CONTRADICTS edge surfacing, PPR network, audit trail |
+| **researcher** | 6 | claim/source ingest, Cypher across citations, saved-view extraction, audit-trail count |
+
+The 4 audience demos are also the integration tests — they run on every CI green and during the comparison harness.
+
+---
+
 ## Who is this for? (Pick your archetype)
 
 THOUGHT serves several distinct audiences. Pick the one that matches and you'll find a 3-command quickstart that gets you to a working setup.

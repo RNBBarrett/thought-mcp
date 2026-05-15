@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "thought-mcp"
-version = "0.5.0"
+version = "0.5.1"
 description = "THOUGHT — Temporal Hierarchical Object Union & Graph Hybrid Toolkit. A local MCP memory server with bi-temporal graph + vector + temporal layers, a query router, and a consolidation engine."
 readme = "README.md"
 license = "MIT"

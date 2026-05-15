@@ -7,6 +7,38 @@ Version numbers follow [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.1] — 2026-05-15 — `thought demo run` — built-in multi-audience dogfood
+
+### Added
+- **`thought demo run [--kind code|writer|legal|researcher|all]`** — the
+  built-in dogfood / smoke / first-confidence-check runner. Each audience
+  runs in a self-cleaning tmp dir; the user's real KB is never touched.
+  - **code** (default, 14 stages) — full agent flow: scan + working_context
+    + Claude SDK adapter + 4 new-language extractors.
+  - **writer** (6 stages) — chapter facts about a character + a contradicting
+    trait, time-travel `as_of` recall, Cypher chronological query, outline preview.
+  - **legal** (6 stages) — witness statements with `unique_predicates`,
+    CONTRADICTS edge surfacing, PPR network around the subject, audit trail.
+  - **researcher** (6 stages) — claim/source ingest, Cypher across citation
+    entities, saved-view extraction, audit-trail count.
+  - **all** — every audience above, sequentially, against one DB.
+- **`thought demo cleanup`** — remove any leftover ``thought-demo-*`` scratch
+  directories from prior runs (e.g. after `--keep` or an interrupted run).
+- **`--keep`** flag — leaves the scratch DB on disk for follow-up
+  inspection.
+- **`--json`** flag — structured output for scripted CI integration.
+- **README "Test your install in 5 seconds"** section — points at the
+  multi-audience demo as the first thing a new user runs after install.
+
+### Internal
+- 330 tests pass (was 320 at v0.5.0). +10 across `test_demo.py` covering
+  every audience, the keep/cleanup flags, the unknown-kind error path,
+  and the CLI surface.
+- New module: `src/thought/demo.py` (the multi-audience runner).
+- All 4 audiences pass end-to-end in ~216 ms on a stock laptop.
+
+---
+
 ## [0.5.0] — 2026-05-15 — Agent substrate + multi-language code memory
 
 Pivot release: THOUGHT goes from *"Claude Code's memory tool"* to *"memory
@@ -516,6 +548,7 @@ classification, 11 frontier techniques stacked.
 - **56 unit tests**, **4 perf benchmarks**, comparison + ablation
   harnesses.
 
+[0.5.1]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.5.1
 [0.5.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/RNBBarrett/thought-mcp/releases/tag/v0.3.0

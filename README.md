@@ -326,6 +326,60 @@ thought hook install --both           # installs into ./.claude/settings.json
 # Restart Claude Code.
 ```
 
+#### What you'll experience after `--both` is installed
+
+| Trigger | What happens | What you'll notice |
+|---|---|---|
+| Every user prompt | `recall(prompt)` runs; top-5 hits inject into the next turn's context (≤8 KB). **Gated on `low_confidence`** — if there's nothing relevant, nothing gets injected. | The agent "already knows" facts from earlier sessions without you mentioning them. Silent miss when truly unrelated — no context pollution. |
+| Every assistant turn ends | Last user + last assistant turn ingested via the pipeline: **sha256 idempotency** + **Jaccard dedup** absorb replays, so the same conversation can run twice without bloating the KB. | `thought stats` slowly grows entity/edge counts as you work. |
+| Contradictions appear | When auto-write sees a fact that conflicts with one already in the KB on a `unique_predicate` (PREFERS / WORKS_AT / OWNS / REPORTS_TO by default), it writes the new fact and adds **`CONTRADICTS` + `SUPERSEDES`** edges. The new fact "wins"; the old one is preserved with `valid_until` set. | Updated preferences and facts work cleanly — you can say "I now prefer Nike" and the KB knows Adidas is historical. |
+| Time passes | The **consolidation engine** runs on a background thread: Ebbinghaus decay scoring, cold-tier demotion of unused entities, duplicate merging. | The KB stays focused; rarely-accessed facts gracefully fade in scoring without being deleted. |
+
+#### Day-1 onboarding tip — seed the KB so you'll *feel* it working
+
+The recall hook is silent when there's nothing relevant. On day 1 of a fresh KB that means *every* turn looks like nothing's happening. Seed it with a handful of facts and you'll feel the difference within minutes:
+
+```bash
+# At a terminal in your project:
+thought ingest "I prefer hand-rolled SQL over ORMs for performance-sensitive code."
+thought ingest "This project uses Python 3.12, ruff, pytest, mypy strict."
+thought ingest "We deploy to AWS Lambda behind API Gateway; cold-start is the perf bottleneck."
+# ...4-5 things that summarise your work context.
+
+thought stats        # confirm entities grew
+```
+
+Now restart Claude Code. The next time you ask something even tangentially related (*"how should I optimise this query?"*), the recall hook will surface the "hand-rolled SQL" preference into context and the agent will weigh it.
+
+#### Quality upgrade: `--mode extract` (highly recommended if you have any LLM configured)
+
+The default `--mode raw` ingests transcripts wholesale and leans on the ingest pipeline's fact-extractor. It works, but the KB accumulates some noise (in-progress reasoning, hedging, "let me think" filler). The fix:
+
+```toml
+# In thought.toml, configure any LLM provider once:
+[llm]
+provider = "ollama"            # or "anthropic" / "lmstudio" / "openai-compat"
+model = "mistral"              # or "claude-haiku-4-5-20251001" / etc.
+base_url = "http://localhost:11434"
+```
+
+Then in `.claude/settings.json` change the Stop hook command:
+
+```json
+"command": "thought hook write --mode extract"
+```
+
+Each assistant turn is now routed through your chosen LLM first to distill *durable facts* before ingest. Costs are small:
+
+| Provider | Approx. per-turn cost |
+|---|---|
+| Anthropic Haiku | ~$0.001/turn |
+| **Ollama / LM Studio (local)** | **$0 — fully local** |
+| OpenAI gpt-4o-mini | ~$0.0005/turn |
+| OpenAI-compat (vLLM/llama.cpp local) | $0 |
+
+The KB stays much cleaner — only third-person factual statements survive, not conversational filler. Strongly recommended once you've decided which LLM you're committing to.
+
 #### Project scope vs. user scope — which one do you want?
 
 `thought hook install` has two scopes, and the right pick depends on whether you want a per-project memory or one memory shared across everything:
@@ -360,22 +414,9 @@ Now every Claude Code session — in any directory — auto-reads + auto-writes 
 
 To remove hooks later: delete the relevant block from `.claude/settings.json` (project or user), or rerun `thought hook install` with different flags after first removing the existing entries (the installer is additive — it doesn't strip stale entries).
 
-From that point on:
+#### Multi-user safety + opt-out
 
-- **Every user turn** → the auto-recall hook runs `thought hook recall` against the prompt, pulls the top-5 hits, and injects them into the next turn's context via Claude Code's `additionalContext` field (10k-char cap). The hook gates on the existing `low_confidence` flag from CRAG, so when there's nothing relevant it stays silent rather than pushing a "no hits" banner into context.
-- **Every assistant turn end** → the auto-write hook runs `thought hook write` against the session transcript, picks the last user + last assistant turn, and pipes them into the existing ingest pipeline. Content-sha256 idempotency + Jaccard dedup absorb replays so the KB doesn't bloat.
-
-If you want higher-signal writes at the cost of a small per-turn LLM call, switch to extract mode:
-
-```bash
-# Set ANTHROPIC_API_KEY, then edit .claude/settings.json:
-#   "command": "thought hook write --mode extract"
-# Each turn is now routed through Haiku to distill durable facts before ingest.
-```
-
-Auto-write writes default to `scope=private` so multi-user deployments don't accidentally cross-pollinate user-specific facts. The bi-temporal model already handles contradictions: if the user says "I prefer Adidas" one day and "I prefer Nike" the next, the second auto-write supersedes the first via `CONTRADICTS` + `SUPERSEDES` edges — exactly the temporal-validity-window pattern from Zep / Graphiti's 2025 work.
-
-To opt out for a turn, just don't trigger the hooks (e.g. with a `--no-hooks` flag in Claude Code, or by uninstalling the hooks from `.claude/settings.json`).
+Auto-write defaults to `scope=private` so multi-user deployments don't accidentally cross-pollinate user-specific facts. To opt out for a single turn, just don't trigger the hooks (e.g. with a `--no-hooks` flag in Claude Code), or uninstall the hooks entirely by deleting the block from `.claude/settings.json`.
 
 ### Browsing what's in your memory
 
